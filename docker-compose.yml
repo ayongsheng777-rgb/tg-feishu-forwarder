@@ -1,0 +1,65 @@
+services:
+  # ---- 后端 API + Telethon 监听 ----
+  backend:
+    build: ./backend
+    restart: always
+    ports:
+      - "8010:8000"
+    environment:
+      - DEBUG=false
+      - DB_URL=sqlite+aiosqlite:////data/tg_feishu.db
+      - REDIS_URL=redis://redis:6379/0
+      - PROXY_URL=${PROXY_URL:-}
+      - TG_API_ID=${TG_API_ID:-0}
+      - TG_API_HASH=${TG_API_HASH:-}
+      - TG_SESSION_NAME=${TG_SESSION_NAME:-forwarder_session}
+      - FEISHU_APP_ID=${FEISHU_APP_ID:-}
+      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET:-}
+      - MEDIA_CACHE_DIR=/app/media_cache
+    volumes:
+      - ./data:/data
+      - ./media_cache:/app/media_cache
+    depends_on:
+      - redis
+
+  # ---- Celery Worker (异步媒体下载/上传) ----
+  worker:
+    build: ./backend
+    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2
+    restart: always
+    environment:
+      - DEBUG=false
+      - DB_URL=sqlite+aiosqlite:////data/tg_feishu.db
+      - REDIS_URL=redis://redis:6379/0
+      - PROXY_URL=${PROXY_URL:-}
+      - TG_API_ID=${TG_API_ID:-0}
+      - TG_API_HASH=${TG_API_HASH:-}
+      - TG_SESSION_NAME=${TG_SESSION_NAME:-forwarder_session}
+      - FEISHU_APP_ID=${FEISHU_APP_ID:-}
+      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET:-}
+      - MEDIA_CACHE_DIR=/app/media_cache
+    volumes:
+      - ./data:/data
+      - ./media_cache:/app/media_cache
+    depends_on:
+      - redis
+      - backend
+
+  # ---- 前端管理后台 (Vue 3 + Nginx) ----
+  frontend:
+    build: ./frontend
+    restart: always
+    ports:
+      - "8090:80"
+    depends_on:
+      - backend
+
+  # ---- Redis 消息队列 ----
+  redis:
+    image: redis:alpine
+    restart: always
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:

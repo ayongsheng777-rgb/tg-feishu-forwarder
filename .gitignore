@@ -1,0 +1,38 @@
+# --- 敏感数据 (绝不提交) ---
+.env
+data/
+media_cache/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- Node.js ---
+node_modules/
+frontend/dist/
+frontend/npm-debug.log*
+
+# --- 构建产物 ---
+*.db
+*.sqlite
+*.session
+*.session-journal
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
