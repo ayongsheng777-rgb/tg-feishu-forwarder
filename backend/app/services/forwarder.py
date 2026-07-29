@@ -330,5 +330,228 @@ class Forwarder:
         finally:
             self._cleanup(file_path)
 
+    # ------------------------------------------------------------------
+    #  Manual fetch — pull missed messages from a TG channel
+    # ------------------------------------------------------------------
+
+    async def manual_fetch(self, db: AsyncSession, channel_db_id: int, limit: int = 20) -> dict:
+        """Fetch messages after ``last_forwarded_id`` and forward them to Feishu.
+
+        This is used when the listener missed messages (e.g. downtime, reconnect)
+        and the user wants to backfill them manually.
+        """
+        result = await db.execute(select(Channel).where(Channel.id == channel_db_id))
+        channel = result.scalar_one_or_none()
+        if not channel:
+            return {"success": False, "message": "频道不存在"}
+        if not channel.feishu_chat_id:
+            return {"success": False, "message": "未配置飞书群ID"}
+
+        client = tg_manager._get_client()
+        if not client.is_connected():
+            await client.connect()
+
+        # Fetch messages whose ID > last_forwarded_id
+        min_id = channel.last_forwarded_id or 0
+        try:
+            messages = await client.get_messages(
+                int(channel.channel_id),
+                min_id=min_id,
+                limit=limit,
+            )
+        except Exception as e:
+            logger.exception("Manual fetch: failed to get messages from %s", channel.channel_id)
+            return {"success": False, "message": f"拉取消息失败: {e}"}
+
+        # Sort ascending (oldest first) so messages forward in chronological order
+        messages = sorted(messages, key=lambda m: m.id)
+
+        stats = {"fetched": 0, "forwarded": 0, "skipped": 0, "failed": 0, "errors": []}
+
+        for msg in messages:
+            # Extra dedup guard
+            if msg.id <= min_id:
+                continue
+            stats["fetched"] += 1
+
+            text = self._clean_text(msg.message or msg.text or "")
+            media_type = rule_engine._get_media_type_from_msg(msg)
+            sender = await self._get_sender_from_msg(msg)
+
+            # Evaluate rules
+            should_forward, reason = await rule_engine.evaluate(
+                db, channel.id, text, media_type
+            )
+
+            if not should_forward:
+                await self._log(db, channel.id, msg.id, sender, text, "", "skipped", "", media_type, f"Filtered: {reason}")
+                await self._update_last_id(db, channel.id, msg.id)
+                stats["skipped"] += 1
+                continue
+
+            try:
+                if media_type == "text":
+                    feishu_msg_id = await self._forward_text(channel.feishu_chat_id, channel, sender, text)
+                elif media_type == "photo":
+                    feishu_msg_id = await self._forward_photo_retry(channel.feishu_chat_id, channel, sender, text, msg)
+                elif media_type == "video":
+                    feishu_msg_id = await self._forward_video_retry(channel.feishu_chat_id, channel, sender, text, msg)
+                else:
+                    feishu_msg_id = await self._forward_document_retry(channel.feishu_chat_id, channel, sender, text, msg)
+
+                await self._log(db, channel.id, msg.id, sender, text, feishu_msg_id, "success", "", media_type, "")
+                await self._update_last_id(db, channel.id, msg.id)
+                stats["forwarded"] += 1
+
+            except Exception as e:
+                logger.exception("Manual fetch: forward failed for msg %s in channel %s", msg.id, channel.channel_id)
+                await self._log(db, channel.id, msg.id, sender, text, "", "failed", "", media_type, str(e))
+                await self._update_last_id(db, channel.id, msg.id)
+                stats["failed"] += 1
+                if len(stats["errors"]) < 10:
+                    stats["errors"].append(f"消息 {msg.id}: {e}")
+
+        logger.info(
+            "Manual fetch done for channel %s: fetched=%d forwarded=%d skipped=%d failed=%d",
+            channel.channel_title, stats["fetched"], stats["forwarded"], stats["skipped"], stats["failed"],
+        )
+        return {"success": True, **stats}
+
+    async def _get_sender_from_msg(self, msg) -> str:
+        """Extract sender display name from a raw Telethon Message object."""
+        try:
+            sender = await msg.get_sender()
+            if sender:
+                name = sender.first_name or ""
+                if sender.last_name:
+                    name += f" {sender.last_name}"
+                if sender.username:
+                    name += f" (@{sender.username})"
+                return name.strip()
+        except Exception:
+            pass
+        return ""
+
+    # ------------------------------------------------------------------
+    #  Date-range fetch — pull messages by date and forward them
+    # ------------------------------------------------------------------
+
+    async def fetch_by_date(
+        self,
+        db: AsyncSession,
+        channel_db_id: int,
+        start_date,
+        end_date,
+        limit: int = 200,
+    ) -> dict:
+        """Fetch messages within a date range and forward them to Feishu.
+
+        ``start_date`` and ``end_date`` are naive ``datetime`` objects in
+        local time (UTC+8).  Already-forwarded messages (with a ``success``
+        log entry) are skipped to avoid duplicates.
+        """
+        from datetime import timezone, timedelta
+
+        CST = timezone(timedelta(hours=8))
+
+        result = await db.execute(select(Channel).where(Channel.id == channel_db_id))
+        channel = result.scalar_one_or_none()
+        if not channel:
+            return {"success": False, "message": "频道不存在"}
+        if not channel.feishu_chat_id:
+            return {"success": False, "message": "未配置飞书群ID"}
+
+        client = tg_manager._get_client()
+        if not client.is_connected():
+            await client.connect()
+
+        # Convert local dates to UTC for Telethon
+        start_utc = start_date.replace(hour=0, minute=0, second=0, tzinfo=CST).astimezone(timezone.utc)
+        end_utc = end_date.replace(hour=23, minute=59, second=59, tzinfo=CST).astimezone(timezone.utc)
+
+        # Telethon's offset_date returns messages *before* this datetime
+        fetch_offset = end_utc + timedelta(seconds=1)
+
+        try:
+            messages = await client.get_messages(
+                int(channel.channel_id),
+                offset_date=fetch_offset,
+                limit=limit,
+            )
+        except Exception as e:
+            logger.exception("fetch_by_date: failed to get messages from %s", channel.channel_id)
+            return {"success": False, "message": f"拉取消息失败: {e}"}
+
+        # Filter messages within the date range (compare in UTC)
+        filtered = []
+        for m in messages:
+            if m.date.tzinfo and start_utc <= m.date <= end_utc:
+                filtered.append(m)
+            elif m.date.tzinfo and m.date < start_utc:
+                break  # Messages are reverse-chronological; stop early
+
+        # Sort ascending (oldest first) for chronological forwarding
+        filtered = sorted(filtered, key=lambda m: m.id)
+
+        # Check which messages were already forwarded successfully
+        msg_ids = [m.id for m in filtered]
+        already_done = set()
+        if msg_ids:
+            result = await db.execute(
+                select(ForwardLog.tg_message_id).where(
+                    ForwardLog.channel_id == channel.id,
+                    ForwardLog.tg_message_id.in_(msg_ids),
+                    ForwardLog.status == "success",
+                )
+            )
+            already_done = set(result.scalars().all())
+
+        stats = {"fetched": 0, "forwarded": 0, "skipped": 0, "failed": 0, "errors": []}
+
+        for msg in filtered:
+            if msg.id in already_done:
+                stats["skipped"] += 1
+                continue
+
+            stats["fetched"] += 1
+            text = self._clean_text(msg.message or msg.text or "")
+            media_type = rule_engine._get_media_type_from_msg(msg)
+            sender = await self._get_sender_from_msg(msg)
+
+            should_forward, reason = await rule_engine.evaluate(
+                db, channel.id, text, media_type
+            )
+            if not should_forward:
+                await self._log(db, channel.id, msg.id, sender, text, "", "skipped", "", media_type, f"Filtered: {reason}")
+                stats["skipped"] += 1
+                continue
+
+            try:
+                if media_type == "text":
+                    feishu_msg_id = await self._forward_text(channel.feishu_chat_id, channel, sender, text)
+                elif media_type == "photo":
+                    feishu_msg_id = await self._forward_photo_retry(channel.feishu_chat_id, channel, sender, text, msg)
+                elif media_type == "video":
+                    feishu_msg_id = await self._forward_video_retry(channel.feishu_chat_id, channel, sender, text, msg)
+                else:
+                    feishu_msg_id = await self._forward_document_retry(channel.feishu_chat_id, channel, sender, text, msg)
+
+                await self._log(db, channel.id, msg.id, sender, text, feishu_msg_id, "success", "", media_type, "")
+                stats["forwarded"] += 1
+
+            except Exception as e:
+                logger.exception("fetch_by_date: forward failed for msg %s in channel %s", msg.id, channel.channel_id)
+                await self._log(db, channel.id, msg.id, sender, text, "", "failed", "", media_type, str(e))
+                stats["failed"] += 1
+                if len(stats["errors"]) < 10:
+                    stats["errors"].append(f"消息 {msg.id}: {e}")
+
+        logger.info(
+            "fetch_by_date done for channel %s (%s~%s): fetched=%d forwarded=%d skipped=%d failed=%d",
+            channel.channel_title, start_date.date(), end_date.date(),
+            stats["fetched"], stats["forwarded"], stats["skipped"], stats["failed"],
+        )
+        return {"success": True, **stats}
+
 
 forwarder = Forwarder()

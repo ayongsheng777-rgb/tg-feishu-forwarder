@@ -1,5 +1,5 @@
 """Channel management API — CRUD + TG dialog discovery."""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.models import Channel
 from app.schemas.channel import ChannelCreate, ChannelUpdate, ChannelOut
 from app.services.telegram_client import tg_manager
+from app.services.forwarder import forwarder
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
 
@@ -58,3 +59,17 @@ async def list_tg_dialogs():
         return {"dialogs": dialogs}
     except Exception as e:
         raise HTTPException(500, f"Failed to list dialogs: {e}")
+
+
+@router.post("/{channel_id}/fetch")
+async def fetch_channel_messages(
+    channel_id: int,
+    limit: int = Query(20, ge=1, le=100, description="最多拉取消息数"),
+    db: AsyncSession = Depends(get_db),
+):
+    """手动采集：从 TG 拉取频道最近未转发的消息并转发到飞书。"""
+    try:
+        result = await forwarder.manual_fetch(db, channel_id, limit=limit)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"采集失败: {e}")

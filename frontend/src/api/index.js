@@ -59,6 +59,7 @@ export const channelApi = {
   update: (id, data) => api.put(`/channels/${id}`, data),
   delete: (id) => api.delete(`/channels/${id}`),
   dialogs: () => api.get('/channels/dialogs'),
+  fetch: (id, limit = 20) => api.post(`/channels/${id}/fetch`, null, { params: { limit }, timeout: 120000 }),
 }
 
 // ---------------- Rules ----------------

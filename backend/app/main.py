@@ -56,12 +56,18 @@ async def lifespan(app: FastAPI):
     import os
     os.makedirs(settings.media_cache_dir, exist_ok=True)
 
+    # Start Feishu long-connection command listener
+    from app.services.feishu_command import feishu_command
+    feishu_command.start()
+    logger.info("Feishu command service started")
+
     yield
 
     # Shutdown
     logger.info("Shutting down ...")
     from app.services.telegram_client import tg_manager
     from app.services.feishu_client import feishu_client
+    await feishu_command.stop()
     await tg_manager.disconnect()
     await feishu_client.close()
     logger.info("Shutdown complete")

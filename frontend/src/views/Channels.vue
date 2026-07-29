@@ -31,8 +31,9 @@
           </template>
         </el-table-column>
         <el-table-column prop="last_forwarded_id" label="最后转发ID" width="120" />
-        <el-table-column label="操作" width="150">
+        <el-table-column label="操作" width="240">
           <template #default="{ row }">
+            <el-button size="small" type="warning" :loading="fetchingId === row.id" @click="openFetch(row)">采集</el-button>
             <el-button size="small" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
           </template>
@@ -83,6 +84,41 @@
         </el-table-column>
       </el-table>
     </el-dialog>
+
+    <!-- Manual Fetch Dialog -->
+    <el-dialog v-model="showFetch" title="手动采集" width="440px">
+      <el-descriptions :column="1" border style="margin-bottom: 16px">
+        <el-descriptions-item label="频道">{{ fetchChannel?.channel_title || fetchChannel?.channel_id }}</el-descriptions-item>
+        <el-descriptions-item label="最后转发ID">{{ fetchChannel?.last_forwarded_id || 0 }}</el-descriptions-item>
+      </el-descriptions>
+      <el-form label-width="100px">
+        <el-form-item label="采集条数">
+          <el-input-number v-model="fetchLimit" :min="1" :max="100" :step="10" />
+          <span style="margin-left: 8px; color: #999; font-size: 13px">将从最后转发ID之后拉取</span>
+        </el-form-item>
+      </el-form>
+      <!-- Result -->
+      <el-result v-if="fetchResult" :icon="fetchResult.success ? 'success' : 'error'" :title="fetchResult.success ? '采集完成' : '采集失败'">
+        <template #sub-title>
+          <div v-if="fetchResult.success">
+            拉取 {{ fetchResult.fetched }} 条 · 成功 {{ fetchResult.forwarded }} ·
+            跳过 {{ fetchResult.skipped }} · 失败 {{ fetchResult.failed }}
+          </div>
+          <div v-else>{{ fetchResult.message }}</div>
+        </template>
+        <template #extra v-if="fetchResult.success && fetchResult.errors?.length">
+          <el-collapse>
+            <el-collapse-item title="失败详情">
+              <div v-for="(err, i) in fetchResult.errors" :key="i" style="color: #f56c6c; font-size: 13px">{{ err }}</div>
+            </el-collapse-item>
+          </el-collapse>
+        </template>
+      </el-result>
+      <template #footer>
+        <el-button @click="showFetch = false">关闭</el-button>
+        <el-button type="primary" :loading="fetchingId === fetchChannel?.id" @click="doFetch">开始采集</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -101,6 +137,13 @@ const showDialogs = ref(false)
 const dialogs = ref([])
 const loadingDialogs = ref(false)
 const dialogSearch = ref('')
+
+// --- Manual fetch ---
+const showFetch = ref(false)
+const fetchChannel = ref(null)
+const fetchLimit = ref(20)
+const fetchingId = ref(null)
+const fetchResult = ref(null)
 
 const filteredDialogs = computed(() => {
   if (!dialogSearch.value) return dialogs.value
@@ -201,6 +244,34 @@ async function importChannel(dialog) {
   editing.value = null
   showDialogs.value = false
   showForm.value = true
+}
+
+function openFetch(row) {
+  fetchChannel.value = row
+  fetchLimit.value = 20
+  fetchResult.value = null
+  showFetch.value = true
+}
+
+async function doFetch() {
+  if (!fetchChannel.value) return
+  fetchingId.value = fetchChannel.value.id
+  fetchResult.value = null
+  try {
+    const res = await channelApi.fetch(fetchChannel.value.id, fetchLimit.value)
+    fetchResult.value = res.data
+    if (res.data.success) {
+      ElMessage.success(`采集完成：成功 ${res.data.forwarded} 条`)
+    } else {
+      ElMessage.error(res.data.message || '采集失败')
+    }
+    loadChannels()  // refresh last_forwarded_id
+  } catch (e) {
+    fetchResult.value = { success: false, message: e.response?.data?.detail || e.message }
+    ElMessage.error('采集失败')
+  } finally {
+    fetchingId.value = null
+  }
 }
 
 onMounted(() => {
