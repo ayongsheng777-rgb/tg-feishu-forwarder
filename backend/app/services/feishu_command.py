@@ -4,15 +4,18 @@ Connects to Feishu via WebSocket long-connection mode using the official
 ``lark-oapi`` SDK, receives message events, parses commands, and triggers
 channel fetch operations.
 
+All commands use a ``tg`` prefix to avoid conflicts with other projects
+sharing the same Feishu bot.
+
 Supported commands (sent in the Feishu group where the bot is a member):
 
-  采集                       — fetch all channels' recent missed messages
-  采集 <频道名>               — fetch a specific channel by fuzzy title match
-  采集 <日期>                 — fetch all channels for a date (e.g. 采集 2026-07-28)
-  采集 <开始> <结束>          — fetch all channels for a date range
-  采集 <频道名> <日期>        — fetch specific channel for a date
-  采集 <频道名> <开始> <结束> — fetch specific channel for a date range
-  帮助 / help                — show available commands
+  tg采集                     — fetch all channels' recent missed messages
+  tg采集 <频道名>             — fetch a specific channel by fuzzy title match
+  tg采集 <日期>               — fetch all channels for a date (e.g. tg采集 2026-07-28)
+  tg采集 <开始> <结束>        — fetch all channels for a date range
+  tg采集 <频道名> <日期>      — fetch specific channel for a date
+  tg采集 <频道名> <开始> <结束> — fetch specific channel for a date range
+  tg帮助                      — show available commands
 
 No public URL is required — the SDK establishes an outbound WebSocket.
 """
@@ -220,7 +223,17 @@ class FeishuCommandService:
     # ------------------------------------------------------------------
 
     async def _process_command(self, chat_id: str, text: str):
-        """Parse and execute a command, then reply with the result."""
+        """Parse and execute a command, then reply with the result.
+
+        All commands are prefixed with ``tg`` to avoid conflicts with other
+        projects sharing the same Feishu bot.  Both ``tg采集`` and
+        ``tg 采集`` are accepted.
+        """
+        # Normalise: "tg 帮助" → "tg帮助", "tg 采集 新闻" → "tg采集 新闻"
+        text = text.strip()
+        if text.lower().startswith("tg "):
+            text = "tg" + text[3:]
+
         parts = text.split()
         if not parts:
             return
@@ -228,12 +241,12 @@ class FeishuCommandService:
         cmd = parts[0].lower()
 
         # --- Help ---
-        if cmd in ("帮助", "help", "?", "？", "h"):
+        if cmd in ("tg帮助", "tghelp", "tg?"):
             await self._send_help(chat_id)
             return
 
         # --- Fetch ---
-        if cmd in ("采集", "fetch", "collect", "cai"):
+        if cmd in ("tg采集", "tgfetch", "tgcollect"):
             args = parts[1:]
             await self._handle_fetch(chat_id, args)
             return
@@ -354,17 +367,17 @@ class FeishuCommandService:
     async def _send_help(self, chat_id: str):
         """Send the help message."""
         help_text = (
-            "📋 飞书采集命令\n\n"
-            "1. 采集 — 采集所有频道的未转发消息\n"
-            "2. 采集 <频道名> — 采集指定频道\n"
-            "3. 采集 <日期> — 按日期采集所有频道\n"
-            "   例: 采集 2026-07-28\n"
-            "4. 采集 <开始> <结束> — 按日期范围采集\n"
-            "   例: 采集 2026-07-25 2026-07-28\n"
-            "5. 采集 <频道名> <日期> — 按日期采集指定频道\n"
-            "   例: 采集 新闻 2026-07-28\n"
-            "6. 采集 <频道名> <开始> <结束> — 按日期范围采集指定频道\n"
-            "7. 帮助 — 显示此帮助信息\n\n"
+            "📋 TG转发采集命令\n\n"
+            "1. tg采集 — 采集所有频道的未转发消息\n"
+            "2. tg采集 <频道名> — 采集指定频道\n"
+            "3. tg采集 <日期> — 按日期采集所有频道\n"
+            "   例: tg采集 2026-07-28\n"
+            "4. tg采集 <开始> <结束> — 按日期范围采集\n"
+            "   例: tg采集 2026-07-25 2026-07-28\n"
+            "5. tg采集 <频道名> <日期> — 按日期采集指定频道\n"
+            "   例: tg采集 新闻 2026-07-28\n"
+            "6. tg采集 <频道名> <开始> <结束> — 按日期范围采集指定频道\n"
+            "7. tg帮助 — 显示此帮助信息\n\n"
             "💡 频道名支持模糊匹配，日期支持 YYYY-MM-DD 或 MM-DD 格式"
         )
         await feishu_client.send_text(chat_id, help_text)
