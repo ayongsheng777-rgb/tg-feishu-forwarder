@@ -2,6 +2,7 @@
 
 Wires up all API routers and handles startup/shutdown lifecycle.
 """
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -13,7 +14,7 @@ from app.core.config import settings
 from app.core.config import sync_db_settings_to_config
 from app.core.database import init_db
 from app.core.security import ensure_jwt_secret, decode_token, get_jwt_secret
-from app.api import auth, channels, rules, logs, settings as settings_api, telegram, system
+from app.api import auth, channels, rules, logs, settings as settings_api, telegram, system, aliases
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -61,6 +62,15 @@ async def lifespan(app: FastAPI):
     feishu_command.start()
     logger.info("Feishu command service started")
 
+    # Start periodic status-report scheduler
+    from app.services.status_reporter import report_scheduler
+    report_scheduler.start()
+
+    # Auto-start the TG listener unless the user explicitly turned it off.
+    # Default = ON ("监听运行是自动打开状态"); the dashboard toggle persists
+    # the preference to the `listener_enabled` setting.
+    asyncio.create_task(_auto_start_listener())
+
     yield
 
     # Shutdown
@@ -68,9 +78,47 @@ async def lifespan(app: FastAPI):
     from app.services.telegram_client import tg_manager
     from app.services.feishu_client import feishu_client
     await feishu_command.stop()
+    await report_scheduler.stop()
     await tg_manager.disconnect()
     await feishu_client.close()
     logger.info("Shutdown complete")
+
+
+async def _auto_start_listener():
+    """Auto-start the TG listener on boot (unless the user turned it off)."""
+    import asyncio as _asyncio
+    from sqlalchemy import select as _select
+    from app.core.database import async_session
+    from app.models import Setting
+    from app.services.telegram_client import tg_manager
+
+    # Give the app a moment to settle before touching TG
+    await _asyncio.sleep(3)
+
+    try:
+        async with async_session() as db:
+            result = await db.execute(
+                _select(Setting).where(Setting.key == "listener_enabled")
+            )
+            pref = result.scalar_one_or_none()
+            if pref and pref.value == "false":
+                logger.info("Listener auto-start skipped (user preference: off)")
+                return
+
+            if not tg_manager.is_connected:
+                try:
+                    if not await tg_manager.connect():
+                        logger.info("Listener auto-start skipped (TG not authorized)")
+                        return
+                except Exception as e:
+                    logger.warning("Listener auto-start: TG connect failed: %s", e)
+                    return
+
+            from app.api.telegram import start_listener_impl
+            channel_ids = await start_listener_impl(db)
+            logger.info("Listener auto-started for %d channels", len(channel_ids))
+    except Exception as e:
+        logger.warning("Listener auto-start failed: %s", e)
 
 
 app = FastAPI(
@@ -129,6 +177,7 @@ app.include_router(rules.router)
 app.include_router(logs.router)
 app.include_router(settings_api.router)
 app.include_router(telegram.router)
+app.include_router(aliases.router)
 
 
 @app.get("/")

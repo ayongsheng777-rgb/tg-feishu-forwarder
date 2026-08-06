@@ -61,6 +61,54 @@
       </el-col>
     </el-row>
 
+    <!-- Status Report Settings -->
+    <el-row :gutter="20" style="margin-top: 20px">
+      <el-col :span="12">
+        <el-card shadow="hover" class="report-card">
+          <template #header>
+            <div class="card-header">
+              <span>运行状态报告</span>
+              <el-tag :type="reportForm.chat_id ? 'success' : 'info'" size="small">
+                {{ reportForm.chat_id ? '已配置目标群' : '未配置' }}
+              </el-tag>
+            </div>
+          </template>
+          <el-form label-width="120px">
+            <el-form-item label="报告目标群">
+              <el-select
+                v-model="reportForm.chat_id"
+                placeholder="选择已绑定的群，或直接输入群ID"
+                filterable
+                allow-create
+                default-first-option
+                clearable
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="a in aliasOptions"
+                  :key="a.feishu_chat_id"
+                  :label="`${a.name}（${a.feishu_chat_id.slice(0, 18)}...）`"
+                  :value="a.feishu_chat_id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="定时推送间隔">
+              <el-input-number v-model="reportForm.interval" :min="0" :max="1440" style="width: 160px" />
+              <span style="margin-left: 10px; color: #6b7a88; font-size: 13px">分钟（0 = 关闭定时推送）</span>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" @click="saveReport">保存</el-button>
+              <el-button :loading="reportPreviewing" @click="previewReport">预览报告</el-button>
+              <el-button :loading="reportSending" @click="sendReportNow">立即发送</el-button>
+            </el-form-item>
+          </el-form>
+          <el-alert type="info" :closable="false" show-icon>
+            也可在飞书群直接发送 <code>tg状态</code> 获取报告；<code>tg状态 群名称</code> 可推送到指定群。
+          </el-alert>
+        </el-card>
+      </el-col>
+    </el-row>
+
     <!-- Env info -->
     <el-card shadow="hover" style="margin-top: 20px">
       <template #header>当前环境配置</template>
@@ -177,7 +225,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { systemApi, settingApi, authApi } from '../api'
+import { systemApi, settingApi, authApi, aliasApi } from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Key, CircleClose } from '@element-plus/icons-vue'
 
@@ -186,6 +234,12 @@ const proxyForm = ref({ url: '' })
 const env = ref({})
 const feishuConfigured = ref(false)
 const proxyConfigured = ref(false)
+
+// --- Status report ---
+const reportForm = ref({ chat_id: '', interval: 0 })
+const aliasOptions = ref([])
+const reportSending = ref(false)
+const reportPreviewing = ref(false)
 
 // --- 2FA state ---
 const user = ref({})
@@ -211,8 +265,18 @@ async function loadAll() {
     proxyForm.value.url = dbMap.proxy_url || ''
     feishuConfigured.value = !!(dbMap.feishu_app_id && dbMap.feishu_app_secret)
     proxyConfigured.value = !!dbMap.proxy_url
+    reportForm.value.chat_id = dbMap.report_chat_id || ''
+    reportForm.value.interval = parseInt(dbMap.report_interval_minutes || '0', 10) || 0
   } catch {
     // fall back to env
+  }
+
+  // Load alias options for the report target selector
+  try {
+    const aliasRes = await aliasApi.list()
+    aliasOptions.value = aliasRes.data.filter(a => a.enabled)
+  } catch {
+    // ignore
   }
 
   // Load env info for the display card (synced from DB on backend startup)
@@ -301,6 +365,56 @@ async function saveProxy() {
     await promptRestart('代理配置已保存')
   } catch {
     ElMessage.error('保存失败')
+  }
+}
+
+// --- Status report functions ---
+async function saveReport() {
+  try {
+    await settingApi.bulk({
+      report_chat_id: reportForm.value.chat_id || '',
+      report_interval_minutes: String(reportForm.value.interval || 0),
+    })
+    ElMessage.success('报告配置已保存（定时推送即时生效，无需重启）')
+  } catch {
+    ElMessage.error('保存失败')
+  }
+}
+
+async function previewReport() {
+  reportPreviewing.value = true
+  try {
+    const res = await systemApi.reportPreview()
+    await ElMessageBox.alert(
+      res.data.text || '（空报告）',
+      '状态报告预览',
+      { confirmButtonText: '关闭' }
+    )
+  } catch {
+    ElMessage.error('生成预览失败')
+  } finally {
+    reportPreviewing.value = false
+  }
+}
+
+async function sendReportNow() {
+  if (!reportForm.value.chat_id) {
+    ElMessage.warning('请先选择报告目标群')
+    return
+  }
+  reportSending.value = true
+  try {
+    await saveReport()
+    const res = await systemApi.reportSend(reportForm.value.chat_id)
+    if (res.data.success) {
+      ElMessage.success('状态报告已发送')
+    } else {
+      ElMessage.error(res.data.message || '发送失败')
+    }
+  } catch {
+    ElMessage.error('发送失败')
+  } finally {
+    reportSending.value = false
   }
 }
 

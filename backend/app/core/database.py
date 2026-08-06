@@ -15,7 +15,7 @@ class Base(DeclarativeBase):
 async def init_db():
     """Create all tables (called on startup)."""
     async with engine.begin() as conn:
-        from app.models import channel, rule, forward_log, setting, user  # noqa: F401
+        from app.models import channel, rule, forward_log, setting, user, chat_alias  # noqa: F401
         await conn.run_sync(Base.metadata.create_all)
 
 

@@ -195,6 +195,18 @@ class FeishuClient:
         )
         return resp.json()
 
+    async def get_chat_name(self, chat_id: str) -> str:
+        """Fetch a chat's display name via the Open API. Returns '' on failure."""
+        await self._ensure_token()
+        resp = await self._http.get(
+            f"{FEISHU_BASE}/im/v1/chats/{chat_id}",
+            headers=self._headers(),
+        )
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"Failed to get chat info: {data}")
+        return data.get("data", {}).get("name", "") or ""
+
     # ------------------------------------------------------------------
     #  Media upload
     # ------------------------------------------------------------------

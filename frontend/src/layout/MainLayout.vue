@@ -1,9 +1,14 @@
 <template>
   <el-container class="app-layout">
-    <el-aside width="220px" class="sidebar">
+    <el-aside width="232px" class="sidebar">
       <div class="logo">
-        <el-icon size="24"><Promotion /></el-icon>
-        <span>TG→飞书转发</span>
+        <div class="logo-icon">
+          <el-icon size="20"><Promotion /></el-icon>
+        </div>
+        <div class="logo-text">
+          <span class="logo-title">TG→飞书转发</span>
+          <span class="logo-sub">Goofish Forwarder</span>
+        </div>
       </div>
       <el-menu
         :default-active="activeMenu"
@@ -22,6 +27,10 @@
           <el-icon><ChatDotSquare /></el-icon>
           <span>频道管理</span>
         </el-menu-item>
+        <el-menu-item index="/aliases">
+          <el-icon><Link /></el-icon>
+          <span>群绑定</span>
+        </el-menu-item>
         <el-menu-item index="/rules">
           <el-icon><Filter /></el-icon>
           <span>转发规则</span>
@@ -35,20 +44,29 @@
           <span>系统设置</span>
         </el-menu-item>
       </el-menu>
+
+      <div class="sidebar-footer">
+        <div class="mini-status">
+          <span class="status-dot" :class="tgConnected ? 'on' : 'off'"></span>
+          <span>TG {{ tgConnected ? '已连接' : '未连接' }}</span>
+        </div>
+        <div class="mini-status">
+          <span class="status-dot" :class="listenerRunning ? 'on' : 'off'"></span>
+          <span>监听 {{ listenerRunning ? '运行中' : '已停止' }}</span>
+        </div>
+      </div>
     </el-aside>
 
     <el-container>
-      <el-header class="header">
+      <el-header class="header" :class="ambientClass">
         <div class="header-left">
           <span class="page-title">{{ currentPageTitle }}</span>
         </div>
         <div class="header-right">
-          <el-tag :type="tgConnected ? 'success' : 'danger'" size="small">
-            TG {{ tgConnected ? '已连接' : '未连接' }}
-          </el-tag>
-          <el-tag :type="listenerRunning ? 'success' : 'info'" size="small">
-            监听 {{ listenerRunning ? '运行中' : '已停止' }}
-          </el-tag>
+          <div class="status-pill" :class="listenerRunning ? 'pill-ok' : 'pill-off'">
+            <span class="status-dot" :class="listenerRunning ? 'on' : 'off'"></span>
+            {{ listenerRunning ? '监听运行中' : '监听已停止' }}
+          </div>
           <el-button
             type="warning"
             size="small"
@@ -80,7 +98,11 @@
       </el-header>
 
       <el-main class="main-content">
-        <router-view />
+        <router-view v-slot="{ Component }">
+          <transition name="fade-slide" mode="out-in">
+            <component :is="Component" />
+          </transition>
+        </router-view>
       </el-main>
     </el-container>
   </el-container>
@@ -107,11 +129,19 @@ const pageTitles = {
   '/': '仪表盘',
   '/telegram': 'Telegram 登录',
   '/channels': '频道管理',
+  '/aliases': '群名称绑定',
   '/rules': '转发规则',
   '/logs': '转发日志',
   '/settings': '系统设置',
 }
 const currentPageTitle = computed(() => pageTitles[route.path] || 'TG→飞书转发系统')
+
+// 状态感知氛围：全绿=森林绿宁静 / 断连=血橙红聚焦 / 部分异常=落日橘
+const ambientClass = computed(() => {
+  if (!tgConnected.value) return 'ambient-error'
+  if (!listenerRunning.value) return 'ambient-warn'
+  return 'ambient-ok'
+})
 
 let pollTimer = null
 
@@ -270,54 +300,133 @@ onUnmounted(() => {
 .app-layout {
   height: 100vh;
 }
+
+/* --- 侧边栏：晨雾液态玻璃 --- */
 .sidebar {
-  background: #304156;
+  background: linear-gradient(180deg, rgba(45, 66, 82, 0.92), rgba(38, 56, 70, 0.95));
+  backdrop-filter: blur(20px) saturate(1.2);
+  -webkit-backdrop-filter: blur(20px) saturate(1.2);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
 .logo {
-  height: 60px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 20px;
+  gap: 12px;
+  padding: 20px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.logo-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: #fff;
-  font-size: 16px;
-  font-weight: 600;
-  background: #2b3648;
+  background: linear-gradient(135deg, #8fc97f, #5ea363);
+  box-shadow: 0 4px 12px rgba(94, 163, 99, 0.45);
+}
+.logo-text {
+  display: flex;
+  flex-direction: column;
+}
+.logo-title {
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.logo-sub {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  letter-spacing: 0.06em;
 }
 .sidebar-menu {
   border-right: none;
-  background: #304156;
+  background: transparent;
+  flex: 1;
+  padding: 10px;
 }
 .sidebar-menu .el-menu-item {
-  color: #bfcbd9;
+  color: rgba(255, 255, 255, 0.68);
+  border-radius: 12px;
+  margin-bottom: 4px;
+  height: 44px;
+  transition: all 0.25s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .sidebar-menu .el-menu-item:hover {
-  background: #263445;
-  color: #409eff;
+  background: rgba(255, 255, 255, 0.08);
+  color: #d3eacc;
+  transform: translateX(3px);
 }
 .sidebar-menu .el-menu-item.is-active {
-  background: #1f2d3d;
-  color: #409eff;
+  background: linear-gradient(135deg, rgba(143, 201, 127, 0.28), rgba(94, 163, 99, 0.18));
+  color: #b4dba8;
+  font-weight: 600;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
+.sidebar-footer {
+  padding: 16px 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mini-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 12px;
+}
+
+/* --- 头部：状态感知色温 --- */
 .header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid #e6e6e6;
-  background: #fff;
+  background: rgba(255, 254, 248, 0.55);
+  backdrop-filter: blur(18px) saturate(1.2);
+  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.6);
 }
 .page-title {
   font-size: 18px;
-  font-weight: 600;
+  font-weight: 700;
+  color: #33414e;
 }
 .header-right {
   display: flex;
+  align-items: center;
   gap: 10px;
 }
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.4s;
+}
+.pill-ok {
+  background: rgba(143, 201, 127, 0.18);
+  color: #2d6a4f;
+  border: 1px solid rgba(143, 201, 127, 0.4);
+}
+.pill-off {
+  background: rgba(231, 115, 74, 0.12);
+  color: #b0542f;
+  border: 1px solid rgba(231, 115, 74, 0.35);
+}
+
 .main-content {
-  background: #f0f2f5;
-  padding: 20px;
+  padding: 22px;
   overflow-y: auto;
+  background: transparent;
 }
 </style>

@@ -115,33 +115,52 @@ async def logout():
 #  Listener control
 # ------------------------------------------------------------------
 
+async def _set_listener_pref(db: AsyncSession, enabled: bool):
+    """Persist the user's desired listener state (survives restarts)."""
+    from app.models import Setting
+
+    result = await db.execute(select(Setting).where(Setting.key == "listener_enabled"))
+    s = result.scalar_one_or_none()
+    value = "true" if enabled else "false"
+    if not s:
+        db.add(Setting(key="listener_enabled", value=value))
+    else:
+        s.value = value
+    await db.commit()
+
+
+async def start_listener_impl(db: AsyncSession) -> list[str]:
+    """Start the TG listener for all enabled channels. Returns channel IDs."""
+    result = await db.execute(
+        select(Channel).where(Channel.enabled == True)
+    )
+    channels = result.scalars().all()
+    channel_ids = [ch.channel_id for ch in channels]
+
+    if not channel_ids:
+        raise HTTPException(400, "No enabled channels to monitor")
+
+    # Stop existing listener if any
+    await tg_manager.stop_listener()
+
+    # Start new listener as background task
+    async def _on_message(event):
+        from app.core.database import async_session
+        async with async_session() as session:
+            await forwarder.handle_new_message(session, event)
+
+    tg_manager._listener_task = asyncio.create_task(
+        tg_manager.start_listener(channel_ids, _on_message)
+    )
+    return channel_ids
+
+
 @router.post("/listener/start")
 async def start_listener(db: AsyncSession = Depends(get_db)):
     """Start listening for new messages on all enabled channels."""
     try:
-        # Get enabled channel IDs
-        result = await db.execute(
-            select(Channel).where(Channel.enabled == True)
-        )
-        channels = result.scalars().all()
-        channel_ids = [ch.channel_id for ch in channels]
-
-        if not channel_ids:
-            raise HTTPException(400, "No enabled channels to monitor")
-
-        # Stop existing listener if any
-        await tg_manager.stop_listener()
-
-        # Start new listener as background task
-        async def _on_message(event):
-            from app.core.database import async_session
-            async with async_session() as session:
-                await forwarder.handle_new_message(session, event)
-
-        tg_manager._listener_task = asyncio.create_task(
-            tg_manager.start_listener(channel_ids, _on_message)
-        )
-
+        channel_ids = await start_listener_impl(db)
+        await _set_listener_pref(db, True)
         return {"ok": True, "channels": channel_ids}
     except HTTPException:
         raise
@@ -150,10 +169,11 @@ async def start_listener(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/listener/stop")
-async def stop_listener():
+async def stop_listener(db: AsyncSession = Depends(get_db)):
     """Stop the TG message listener."""
     try:
         await tg_manager.stop_listener()
+        await _set_listener_pref(db, False)
         return {"ok": True}
     except Exception as e:
         raise HTTPException(500, f"Failed to stop listener: {e}")

@@ -48,6 +48,38 @@ async def env_info():
     }
 
 
+# ------------------------------------------------------------------
+#  Runtime status report
+# ------------------------------------------------------------------
+
+@router.get("/report")
+async def report_preview():
+    """Build the status report and return it as text (no sending)."""
+    from app.core.database import async_session
+    from app.services.status_reporter import build_report
+
+    async with async_session() as db:
+        text = await build_report(db)
+    return {"ok": True, "text": text}
+
+
+@router.post("/report/send")
+async def report_send(body: dict | None = None):
+    """Send the status report to a Feishu group.
+
+    Body (optional): {"chat_id": "oc_..."} — overrides the configured
+    ``report_chat_id`` setting.
+    """
+    from app.services.status_reporter import send_report
+
+    chat_id = (body or {}).get("chat_id") or None
+    try:
+        result = await send_report(chat_id)
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    return result
+
+
 def _delayed_exit(delay: float = 1.5):
     """Wait briefly then exit the process; Docker restart policy brings it back."""
     time.sleep(delay)

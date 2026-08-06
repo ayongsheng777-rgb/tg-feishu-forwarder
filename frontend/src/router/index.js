@@ -20,6 +20,7 @@ const routes = [
     children: [
       { path: '', name: 'Dashboard', component: () => import('../views/Dashboard.vue') },
       { path: 'channels', name: 'Channels', component: () => import('../views/Channels.vue') },
+      { path: 'aliases', name: 'Aliases', component: () => import('../views/Aliases.vue') },
       { path: 'rules', name: 'Rules', component: () => import('../views/Rules.vue') },
       { path: 'logs', name: 'Logs', component: () => import('../views/Logs.vue') },
       { path: 'settings', name: 'Settings', component: () => import('../views/Settings.vue') },

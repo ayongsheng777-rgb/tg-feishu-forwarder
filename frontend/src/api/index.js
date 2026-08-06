@@ -50,6 +50,17 @@ export const systemApi = {
   info: () => api.get('/system/info'),
   env: () => api.get('/system/env'),
   restart: () => api.post('/system/restart'),
+  reportPreview: () => api.get('/system/report'),
+  reportSend: (chat_id) => api.post('/system/report/send', chat_id ? { chat_id } : {}),
+}
+
+// ---------------- Chat Aliases (群名称绑定) ----------------
+export const aliasApi = {
+  list: () => api.get('/aliases'),
+  create: (data) => api.post('/aliases', data),
+  update: (id, data) => api.put(`/aliases/${id}`, data),
+  delete: (id) => api.delete(`/aliases/${id}`),
+  channels: (id) => api.get(`/aliases/${id}/channels`),
 }
 
 // ---------------- Channels ----------------
