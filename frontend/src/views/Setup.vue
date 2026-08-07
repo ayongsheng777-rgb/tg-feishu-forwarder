@@ -3,8 +3,8 @@
     <el-card class="setup-card">
       <template #header>
         <div class="setup-header">
-          <el-icon size="32" color="#67c23a"><CircleCheck /></el-icon>
-          <h2>初始化管理员账户</h2>
+          <img src="/qingniao.png" alt="青鸟" style="width: 64px; height: 64px; border-radius: 18px; box-shadow: 0 6px 18px rgba(45,66,82,.25)" />
+          <h2>青鸟 · 初始化管理员账户</h2>
           <p class="setup-desc">首次使用，请创建管理员账号</p>
         </div>
       </template>

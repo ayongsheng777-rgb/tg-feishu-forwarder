@@ -321,8 +321,14 @@ class FeishuCommandService:
         try:
             async with async_session() as db:
                 alias = await alias_resolver.bind_alias(db, name, target_chat, auto=False)
+            # Verify bot membership in the target group
+            try:
+                real_name = await feishu_client.get_chat_name(target_chat)
+                extra = f"\n群实际名称: {real_name}" if real_name else ""
+            except Exception:
+                extra = "\n⚠️ 注意：机器人不在该群内，转发会失败——请先把机器人拉进该群"
             await feishu_client.send_text(
-                chat_id, f"✅ 已绑定: 「{alias.name}」 → {alias.feishu_chat_id}"
+                chat_id, f"✅ 已绑定: 「{alias.name}」 → {alias.feishu_chat_id}{extra}"
             )
         except Exception as e:
             logger.exception("Feishu command: bind failed")
@@ -516,7 +522,7 @@ class FeishuCommandService:
     async def _send_help(self, chat_id: str):
         """Send the help message."""
         help_text = (
-            "📋 TG转发采集命令\n\n"
+            "📋 青鸟采集命令\n\n"
             "1. tg采集 — 采集所有频道的未转发消息\n"
             "2. tg采集 <频道名> — 采集指定频道\n"
             "3. tg采集 <群名称> — 按群绑定采集（如: tg采集 科技）\n"

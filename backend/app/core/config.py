@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 class Settings(BaseSettings):
     # --- General ---
-    app_name: str = "TG-Feishu Forwarder"
+    app_name: str = "青鸟 QingNiao Forwarder"
     debug: bool = Field(default=False, alias="DEBUG")
 
     # --- Database ---

@@ -176,8 +176,12 @@ async function save() {
       await aliasApi.update(editing.value.id, form.value)
       ElMessage.success('已更新')
     } else {
-      await aliasApi.create(form.value)
-      ElMessage.success('已绑定')
+      const res = await aliasApi.create(form.value)
+      if (res.data.warning && res.data.warning.startsWith('⚠️')) {
+        ElMessage.warning(res.data.warning)
+      } else {
+        ElMessage.success(res.data.warning || '已绑定')
+      }
     }
     dialogVisible.value = false
     load()

@@ -98,7 +98,7 @@ async def build_report(db) -> str:
     overall = "🟢 正常" if (listener_running and tg_ok) else ("🟠 异常" if tg_ok else "🔴 阻断")
 
     lines = [
-        f"📊 TG→飞书转发 运行状态报告",
+        f"📊 青鸟 · 运行状态报告",
         f"🕐 {now.strftime('%Y-%m-%d %H:%M:%S')}",
         "",
         f"总体状态: {overall}",

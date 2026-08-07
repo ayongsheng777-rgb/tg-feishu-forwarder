@@ -91,6 +91,17 @@ class FeishuClient:
     #  Messaging
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _check_resp(data: dict, action: str = "Send message") -> dict:
+        """Raise on Feishu API-level errors (HTTP 200/400 both possible).
+
+        Without this, failures like code 230002 (bot not in chat) were
+        silently treated as successful sends.
+        """
+        if data.get("code") != 0:
+            raise RuntimeError(f"{action} failed: {data.get('msg')} (code={data.get('code')})")
+        return data
+
     async def send_text(self, chat_id: str, text: str) -> dict:
         """Send a plain text message."""
         await self._ensure_token()
@@ -104,7 +115,7 @@ class FeishuClient:
                 "content": f'{{"text": {_json_str(text)}}}',
             },
         )
-        return resp.json()
+        return self._check_resp(resp.json(), "Send text")
 
     async def send_card(self, chat_id: str, card: dict) -> dict:
         """Send an interactive card message."""
@@ -120,7 +131,7 @@ class FeishuClient:
                 "content": json.dumps(card, ensure_ascii=False),
             },
         )
-        return resp.json()
+        return self._check_resp(resp.json(), "Send card")
 
     async def send_rich_text(self, chat_id: str, title: str, elements: list[dict]) -> dict:
         """Send a rich-text post message.
@@ -147,7 +158,7 @@ class FeishuClient:
                 "content": json.dumps(post_content, ensure_ascii=False),
             },
         )
-        return resp.json()
+        return self._check_resp(resp.json(), "Send rich text")
 
     async def send_image(self, chat_id: str, image_key: str) -> dict:
         """Send an image message using a pre-uploaded image_key."""
@@ -162,7 +173,7 @@ class FeishuClient:
                 "content": f'{{"image_key": "{image_key}"}}',
             },
         )
-        return resp.json()
+        return self._check_resp(resp.json(), "Send image")
 
     async def send_video(self, chat_id: str, video_key: str, file_key: str = "") -> dict:
         """Send a video message using a pre-uploaded file_key."""
@@ -178,7 +189,7 @@ class FeishuClient:
                 "content": content,
             },
         )
-        return resp.json()
+        return self._check_resp(resp.json(), "Send video")
 
     async def send_file(self, chat_id: str, file_key: str) -> dict:
         """Send a file message using a pre-uploaded file_key."""
@@ -193,7 +204,7 @@ class FeishuClient:
                 "content": f'{{"file_key": "{file_key}"}}',
             },
         )
-        return resp.json()
+        return self._check_resp(resp.json(), "Send file")
 
     async def get_chat_name(self, chat_id: str) -> str:
         """Fetch a chat's display name via the Open API. Returns '' on failure."""
@@ -216,20 +227,34 @@ class FeishuClient:
 
         Feishu's ``image_type=message`` requires images ≤ 1500×1500 px
         and ≤ 10 MB.  Oversized images are auto-resized/compressed via Pillow.
+        If Feishu rejects the format (e.g. code 234011 "Can't recognize image
+        format" — common with TG webp/sticker exports), the image is
+        force-converted to JPEG and retried once.
         """
         await self._ensure_token()
+        try:
+            return await self._upload_image_once(file_path, force_jpeg=False)
+        except RuntimeError:
+            logger.info("Image upload rejected, retrying with forced JPEG: %s", file_path)
+            return await self._upload_image_once(file_path, force_jpeg=True)
+
+    async def _upload_image_once(self, file_path: str, force_jpeg: bool) -> str:
         import os as _os
 
         filename = _os.path.basename(file_path)
-        processed_path = self._prepare_image(file_path)
+        processed_path = self._prepare_image(file_path, force=force_jpeg)
         try:
             with open(processed_path, "rb") as f:
                 file_bytes = f.read()
-            ext = _os.path.splitext(filename)[1].lower() or ".jpg"
-            ct_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                      ".png": "image/png", ".webp": "image/webp",
-                      ".gif": "image/gif", ".bmp": "image/bmp"}
-            content_type = ct_map.get(ext, "image/jpeg")
+            if force_jpeg or processed_path.endswith(".jpg"):
+                filename = _os.path.splitext(filename)[0] + ".jpg"
+                content_type = "image/jpeg"
+            else:
+                ext = _os.path.splitext(filename)[1].lower() or ".jpg"
+                ct_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                          ".png": "image/png", ".webp": "image/webp",
+                          ".gif": "image/gif", ".bmp": "image/bmp"}
+                content_type = ct_map.get(ext, "image/jpeg")
             resp = await self._http.post(
                 f"{FEISHU_BASE}/im/v1/images",
                 data={"image_type": "message"},
@@ -245,14 +270,13 @@ class FeishuClient:
         return data["data"]["image_key"]
 
     @staticmethod
-    def _prepare_image(file_path: str) -> str:
+    def _prepare_image(file_path: str, force: bool = False) -> str:
         """Resize / compress an image to meet Feishu limits.
 
         Returns the original path if no processing is needed, or a
-        temporary path for the processed image.
-        import os as _os
-        import tempfile
-        from PIL import Image
+        temporary path for the processed image.  With ``force=True`` the
+        image is always converted to a clean JPEG (used as a retry when
+        Feishu can't recognize the original format).
         """
         import os as _os
         import tempfile
@@ -271,7 +295,7 @@ class FeishuClient:
         needs_resize = w > MAX_DIM or h > MAX_DIM
         needs_recompress = _os.path.getsize(file_path) > MAX_BYTES
 
-        if not needs_resize and not needs_recompress:
+        if not force and not needs_resize and not needs_recompress:
             return file_path
 
         # Resize if needed (preserve aspect ratio)

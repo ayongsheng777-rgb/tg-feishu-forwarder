@@ -3,8 +3,8 @@
     <el-card class="login-card">
       <template #header>
         <div class="login-header">
-          <el-icon size="32" color="#409eff"><Promotion /></el-icon>
-          <h2>TG → 飞书转发系统</h2>
+          <img src="/qingniao.png" alt="青鸟" class="login-logo" />
+          <h2>青鸟 · TG→飞书转发</h2>
         </div>
       </template>
 
@@ -168,19 +168,32 @@ async function handleOtp() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background:
+    radial-gradient(1200px 600px at 85% -10%, rgba(155, 126, 217, 0.35), transparent 55%),
+    radial-gradient(1000px 500px at -10% 110%, rgba(143, 201, 127, 0.35), transparent 55%),
+    linear-gradient(160deg, #7f9ab5 0%, #5e7a96 50%, #4a6478 100%);
 }
 .login-card {
   width: 400px;
-  border-radius: 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+  border-radius: 20px;
+  background: rgba(255, 254, 248, 0.82);
+  backdrop-filter: blur(20px) saturate(1.2);
+  -webkit-backdrop-filter: blur(20px) saturate(1.2);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  box-shadow: 0 12px 40px rgba(45, 66, 82, 0.25);
+}
+.login-logo {
+  width: 72px;
+  height: 72px;
+  border-radius: 20px;
+  box-shadow: 0 6px 18px rgba(45, 66, 82, 0.25);
 }
 .login-header {
   text-align: center;
 }
 .login-header h2 {
   margin: 12px 0 0;
-  color: #303133;
+  color: #33414e;
   font-size: 20px;
 }
 .otp-step .otp-hint {

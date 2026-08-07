@@ -17,8 +17,10 @@ async def list_aliases(db: AsyncSession = Depends(get_db)):
     return result.scalars().all()
 
 
-@router.post("", response_model=ChatAliasOut)
+@router.post("", response_model=None)
 async def create_alias(data: ChatAliasCreate, db: AsyncSession = Depends(get_db)):
+    from app.services.feishu_client import feishu_client
+
     name = data.name.strip()
     chat_id = data.feishu_chat_id.strip()
     if not name or not chat_id:
@@ -29,7 +31,18 @@ async def create_alias(data: ChatAliasCreate, db: AsyncSession = Depends(get_db)
     existing = result.scalar_one_or_none()
     if existing:
         raise HTTPException(409, "该飞书群ID已绑定名称「%s」，请直接编辑" % existing.name)
-    return await alias_resolver.bind_alias(db, name, chat_id, auto=False)
+    alias = await alias_resolver.bind_alias(db, name, chat_id, auto=False)
+
+    # Verify the bot is actually a member of that group
+    warning = ""
+    try:
+        real_name = await feishu_client.get_chat_name(chat_id)
+        if real_name:
+            warning = f"机器人在群内，群实际名称：{real_name}"
+    except Exception:
+        warning = "⚠️ 机器人不在该群内（或无法访问），转发会失败——请先把机器人拉进该群"
+
+    return {**ChatAliasOut.model_validate(alias).model_dump(), "warning": warning}
 
 
 @router.put("/{alias_id}", response_model=ChatAliasOut)

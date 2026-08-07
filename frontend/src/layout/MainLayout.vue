@@ -2,12 +2,10 @@
   <el-container class="app-layout">
     <el-aside width="232px" class="sidebar">
       <div class="logo">
-        <div class="logo-icon">
-          <el-icon size="20"><Promotion /></el-icon>
-        </div>
+        <img src="/qingniao.png" alt="青鸟" class="logo-img" />
         <div class="logo-text">
-          <span class="logo-title">TG→飞书转发</span>
-          <span class="logo-sub">Goofish Forwarder</span>
+          <span class="logo-title">青鸟</span>
+          <span class="logo-sub">TG → 飞书转发</span>
         </div>
       </div>
       <el-menu
@@ -134,7 +132,7 @@ const pageTitles = {
   '/logs': '转发日志',
   '/settings': '系统设置',
 }
-const currentPageTitle = computed(() => pageTitles[route.path] || 'TG→飞书转发系统')
+const currentPageTitle = computed(() => pageTitles[route.path] || '青鸟 · TG→飞书转发')
 
 // 状态感知氛围：全绿=森林绿宁静 / 断连=血橙红聚焦 / 部分异常=落日橘
 const ambientClass = computed(() => {
@@ -318,16 +316,12 @@ onUnmounted(() => {
   padding: 20px 18px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
-.logo-icon {
-  width: 38px;
-  height: 38px;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  background: linear-gradient(135deg, #8fc97f, #5ea363);
-  box-shadow: 0 4px 12px rgba(94, 163, 99, 0.45);
+.logo-img {
+  width: 42px;
+  height: 42px;
+  border-radius: 13px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  flex-shrink: 0;
 }
 .logo-text {
   display: flex;
