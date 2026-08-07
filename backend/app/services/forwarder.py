@@ -86,7 +86,8 @@ class Forwarder:
         except Exception as e:
             logger.exception("Forward failed for msg %s in channel %s", msg.id, chat_id)
             await self._log(db, channel.id, msg.id, sender_name, text, "", "failed", "", media_type, str(e))
-            await self._update_last_id(db, channel.id, msg.id)
+            # NOTE: do NOT advance last_forwarded_id on failure — a later
+            # manual fetch (采集) will retry this message automatically.
 
     # ------------------------------------------------------------------
     #  Individual forward methods
@@ -406,7 +407,8 @@ class Forwarder:
             except Exception as e:
                 logger.exception("Manual fetch: forward failed for msg %s in channel %s", msg.id, channel.channel_id)
                 await self._log(db, channel.id, msg.id, sender, text, "", "failed", "", media_type, str(e))
-                await self._update_last_id(db, channel.id, msg.id)
+                # NOTE: keep last_forwarded_id untouched so the next fetch
+                # retries this failed message instead of skipping it.
                 stats["failed"] += 1
                 if len(stats["errors"]) < 10:
                     stats["errors"].append(f"消息 {msg.id}: {e}")
