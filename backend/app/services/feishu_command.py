@@ -315,6 +315,11 @@ class FeishuCommandService:
             await self._handle_subscribe(chat_id, parts[1:])
             return
 
+        # --- Clear forwarding logs ---
+        if cmd in ("tg清理", "tg清空", "tgclear", "tg清除"):
+            await self._handle_clear_logs(chat_id, parts[1:])
+            return
+
         # --- Bind group name -> chat ID ---
         if cmd in ("tg绑定", "tgbind"):
             await self._handle_bind(chat_id, parts[1:])
@@ -674,6 +679,46 @@ class FeishuCommandService:
             logger.exception("listener toggle failed")
             await feishu_client.send_text(chat_id, f"❌ 操作失败: {e}")
 
+    async def _handle_clear_logs(self, chat_id: str, args: list[str]):
+        """tg清理 日志 [确认] — 清空转发历史记录（带确认防误删）。
+
+        · tg清理 日志        → 预览将清空的条数（不删除）
+        · tg清理 日志 确认   → 执行清空全部转发日志
+        """
+        from app.core.database import async_session
+        from app.models import ForwardLog
+        from sqlalchemy import select, func, delete as sa_delete
+
+        sub = (args[0].lower() if args else "")
+        if sub not in ("日志", "log", "logs", "全部", "all"):
+            await feishu_client.send_text(
+                chat_id,
+                "🧹 用法: tg清理 日志 — 清空转发历史记录\n"
+                "· tg清理 日志 — 预览将清空的数量（不删除）\n"
+                "· tg清理 日志 确认 — 执行清空全部转发日志",
+            )
+            return
+
+        confirm = len(args) >= 2 and args[1].lower() in ("确认", "yes", "confirm")
+        try:
+            async with async_session() as db:
+                if not confirm:
+                    total = await db.scalar(select(func.count(ForwardLog.id)))
+                    await feishu_client.send_text(
+                        chat_id,
+                        f"⚠️ 即将清空全部转发日志（共 {total or 0} 条），此操作不可恢复。\n"
+                        "回复「tg清理 日志 确认」执行清空。",
+                    )
+                    return
+                result = await db.execute(sa_delete(ForwardLog))
+                await db.commit()
+                await feishu_client.send_text(
+                    chat_id, f"✅ 已清空转发日志，共删除 {result.rowcount} 条。"
+                )
+        except Exception as e:
+            logger.exception("clear logs failed")
+            await feishu_client.send_text(chat_id, f"❌ 清空失败: {e}")
+
     async def _handle_restart(self, chat_id: str):
         """tg重启 / tg重启系统 — exit the backend process; Docker auto-restarts."""
         await feishu_client.send_text(chat_id, "🔄 正在重启系统，约 10~30 秒后恢复…")
@@ -920,6 +965,9 @@ class FeishuCommandService:
             "· tg监听 开启 / tg监听 关闭 — 开启/关闭实时监听（tg监控 等同）\n"
             "· tg重启 — 重启后端服务（Docker 自动拉起）\n"
             "· tg补抓 <分钟> — 周期补抓间隔（0=关闭，默认 2 分钟；无参数查看当前值）\n\n"
+            "【日志管理】\n"
+            "· tg清理 日志 — 预览将清空的转发日志数量\n"
+            "· tg清理 日志 确认 — 清空全部转发历史记录\n\n"
             "【Telegram 登录（掉线重登）】\n"
             "· tg登录 <手机号> — 发送登录验证码到 TG（如: tg登录 +8613800138000）\n"
             "· tg验证码 <6位码> — 输入验证码完成登录\n"

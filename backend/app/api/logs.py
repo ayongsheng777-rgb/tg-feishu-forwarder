@@ -1,6 +1,8 @@
-"""Forward logs API — list with pagination + stats + retry."""
+"""Forward logs API — list with pagination + stats + retry + clear."""
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, func, desc
+from fastapi.responses import JSONResponse
+from sqlalchemy import select, func, desc, delete
+from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db, async_session
@@ -69,3 +71,36 @@ async def retry_all_failed(db: AsyncSession = Depends(get_db)):
         "failed": len(results) - succeeded,
         "details": results,
     }
+
+
+@router.delete("")
+async def clear_logs(
+    status: str = Query("", description="只清理指定状态: success/failed/skipped/pending，空=全部"),
+    before: str = Query("", description="只清理该时间之前的记录 (ISO 8601, 如 2026-01-01T00:00:00)，空=不限"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Clear forwarding logs. Optional status / before filters; returns deleted count."""
+    conditions = []
+    if status:
+        if status not in ("success", "failed", "skipped", "pending"):
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "status 仅支持 success/failed/skipped/pending"},
+            )
+        conditions.append(ForwardLog.status == status)
+    if before:
+        try:
+            dt = datetime.fromisoformat(before)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "before 格式错误，需 ISO 8601 (如 2026-01-01T00:00:00)"},
+            )
+        conditions.append(ForwardLog.created_at < dt)
+
+    stmt = delete(ForwardLog)
+    for c in conditions:
+        stmt = stmt.where(c)
+    result = await db.execute(stmt)
+    await db.commit()
+    return {"deleted": result.rowcount}

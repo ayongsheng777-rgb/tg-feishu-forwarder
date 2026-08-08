@@ -87,6 +87,7 @@ export const logApi = {
   stats: () => api.get('/logs/stats'),
   retry: (id) => api.post(`/logs/${id}/retry`),
   retryFailed: () => api.post('/logs/retry-failed', {}, { timeout: 120000 }),
+  clear: (params) => api.delete('/logs', { params: params || {} }),
 }
 
 // ---------------- Settings ----------------

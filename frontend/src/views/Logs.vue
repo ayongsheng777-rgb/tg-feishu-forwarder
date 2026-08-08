@@ -16,6 +16,9 @@
             <el-button type="warning" @click="retryAllFailed" :loading="retrying" v-if="stats.failed > 0">
               <el-icon><RefreshRight /></el-icon> 重试全部失败 ({{ stats.failed }})
             </el-button>
+            <el-button type="danger" @click="clearLogs" :loading="clearing">
+              <el-icon><Delete /></el-icon> 清空日志
+            </el-button>
           </div>
         </div>
       </template>
@@ -83,7 +86,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { logApi } from '../api'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 const logs = ref([])
 const stats = ref({ total: 0, success: 0, failed: 0, skipped: 0 })
@@ -93,6 +96,7 @@ const pageSize = ref(50)
 const total = ref(0)
 const filterStatus = ref('')
 const retrying = ref(false)
+const clearing = ref(false)
 
 function statusColor(s) {
   const map = { success: 'success', failed: 'danger', skipped: 'info', pending: 'warning' }
@@ -181,7 +185,32 @@ async function retryAllFailed() {
     retrying.value = false
   }
 }
-</script>
+
+async function clearLogs() {
+  const statusText = filterStatus.value ? `状态为「${statusLabel(filterStatus.value)}」的` : '全部'
+  try {
+    await ElMessageBox.confirm(
+      `确定要清空${statusText}转发日志吗？此操作不可恢复。`,
+      '清空转发日志',
+      { type: 'warning', confirmButtonText: '清空', cancelButtonText: '取消' }
+    )
+  } catch {
+    return // 用户取消
+  }
+  clearing.value = true
+  try {
+    const params = {}
+    if (filterStatus.value) params.status = filterStatus.value
+    const res = await logApi.clear(params)
+    ElMessage.success(`已清空 ${res.data.deleted} 条转发日志`)
+    loadStats()
+    loadLogs()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '清空失败')
+  } finally {
+    clearing.value = false
+  }
+}</script>
 
 <style scoped>
 .card-header {
