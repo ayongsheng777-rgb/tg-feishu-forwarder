@@ -285,7 +285,7 @@ class FeishuCommandService:
             return
 
         # --- Listener on/off ---
-        if cmd in ("tg监听", "tglisten"):
+        if cmd in ("tg监听", "tglisten", "tg监控", "tgmonitor"):
             await self._handle_listener(chat_id, parts[1:])
             return
 
@@ -656,7 +656,7 @@ class FeishuCommandService:
             state = "运行中" if running else "已停止"
             await feishu_client.send_text(
                 chat_id,
-                f"🔈 当前监听状态: {state}\n用法: tg监听 开启 / tg监听 关闭",
+                f"🔈 当前监听状态: {state}\n用法: tg监听 开启 / tg监听 关闭（tg监控 等同）",
             )
             return
 
@@ -916,8 +916,8 @@ class FeishuCommandService:
             "· tg恢复 <频道名> — 恢复已暂停的频道\n"
             "· tg移除 <频道名> — 从系统中删除频道\n\n"
             "【监听与系统】\n"
-            "· tg监听 — 查看实时监听状态\n"
-            "· tg监听 开启 / tg监听 关闭 — 开启/关闭实时监听\n"
+            "· tg监听 / tg监控 — 查看实时监听状态\n"
+            "· tg监听 开启 / tg监听 关闭 — 开启/关闭实时监听（tg监控 等同）\n"
             "· tg重启 — 重启后端服务（Docker 自动拉起）\n"
             "· tg补抓 <分钟> — 周期补抓间隔（0=关闭，默认 2 分钟；无参数查看当前值）\n\n"
             "【Telegram 登录（掉线重登）】\n"
