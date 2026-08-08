@@ -5,6 +5,7 @@ Handles:
   - Sending text / rich-text / card messages
   - Uploading media (images, videos, files) to Feishu IM
 """
+import json
 import time
 import logging
 from typing import Any
@@ -193,17 +194,25 @@ class FeishuClient:
         return self._check_resp(resp.json(), "Send image")
 
     async def send_video(self, chat_id: str, video_key: str, file_key: str = "") -> dict:
-        """Send a video message using a pre-uploaded file_key."""
+        """Send a video message using a pre-uploaded file_key.
+
+        Feishu has no ``video`` msg_type -- videos are sent as ``media``.
+        The file MUST have been uploaded with ``file_type="mp4"``, otherwise
+        the returned file_key is not accepted as playable media.
+        ``video_key`` is the optional cover image_key.
+        """
         await self._ensure_token()
-        content = f'{{"file_key": "{file_key}"}}'
+        payload = {"file_key": file_key}
+        if video_key:
+            payload["image_key"] = video_key
         resp = await self._http.post(
             f"{FEISHU_BASE}/im/v1/messages",
             params={"receive_id_type": "chat_id"},
             headers=self._headers(),
             json={
                 "receive_id": chat_id,
-                "msg_type": "video",
-                "content": content,
+                "msg_type": "media",
+                "content": json.dumps(payload, ensure_ascii=False),
             },
         )
         return self._check_resp(resp.json(), "Send video")

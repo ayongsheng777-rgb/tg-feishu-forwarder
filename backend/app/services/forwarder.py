@@ -19,6 +19,10 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# 视频不转发（飞书对 TG 视频编码/体积限制严格，且大文件下载会拖死补抓循环），
+# 改为投递文案 + 本提示。
+VIDEO_NOTICE = "📹 此信息包含视频，请回 TG 观看原视频！"
+
 
 class Forwarder:
     """Main forwarding orchestration."""
@@ -139,21 +143,40 @@ class Forwarder:
             self._cleanup(file_path)
 
     async def _forward_video(self, chat_id: str, channel: Channel, sender: str, text: str, event, msg) -> str:
-        """Download video from TG, upload to Feishu, send video + caption."""
-        file_path = await tg_manager.download_media(msg)
-        if not file_path:
-            return await self._forward_text(chat_id, channel, sender, text)
+        """Videos are intentionally NOT forwarded.
 
-        try:
-            file_key = await feishu_client.upload_file(file_path, file_type="stream")
-            resp = await feishu_client.send_video(chat_id, video_key="", file_key=file_key)
+        Feishu rejects most TG videos (codec/size limits) and downloading large
+        files blocks the catch-up loop for minutes. Deliver the caption plus a
+        notice pointing back to Telegram instead.
+        """
+        return await self._forward_text(
+            chat_id, channel, sender, self._video_notice_text(channel, text, msg)
+        )
 
-            if text:
-                await self._forward_text(chat_id, channel, sender, text)
+    @staticmethod
+    def _tg_message_link(channel: Channel, msg) -> str:
+        """Best-effort t.me deep link for a channel message."""
+        mid = getattr(msg, "id", None)
+        if not mid:
+            return ""
+        username = (channel.channel_username or "").lstrip("@")
+        if username:
+            return f"https://t.me/{username}/{mid}"
+        cid = str(channel.channel_id or "")
+        if cid.startswith("-100"):
+            return f"https://t.me/c/{cid[4:]}/{mid}"
+        return ""
 
-            return self._extract_msg_id(resp)
-        finally:
-            self._cleanup(file_path)
+    def _video_notice_text(self, channel: Channel, text: str, msg) -> str:
+        """Caption + 'watch on Telegram' notice used in place of the video."""
+        parts = []
+        if text:
+            parts.append(text)
+        parts.append(VIDEO_NOTICE)
+        link = self._tg_message_link(channel, msg)
+        if link:
+            parts.append(link)
+        return "\n\n".join(parts)
 
     async def _forward_document(self, chat_id: str, channel: Channel, sender: str, text: str, event, msg) -> str:
         """Download document from TG, upload to Feishu, send file + caption."""
@@ -323,17 +346,10 @@ class Forwarder:
             self._cleanup(file_path)
 
     async def _forward_video_retry(self, chat_id, channel, sender, text, msg) -> str:
-        file_path = await tg_manager.download_media(msg)
-        if not file_path:
-            return await self._forward_text(chat_id, channel, sender, text)
-        try:
-            file_key = await feishu_client.upload_file(file_path, file_type="stream")
-            resp = await feishu_client.send_video(chat_id, video_key="", file_key=file_key)
-            if text:
-                await self._forward_text(chat_id, channel, sender, text)
-            return self._extract_msg_id(resp)
-        finally:
-            self._cleanup(file_path)
+        """Videos are not forwarded — send caption + notice (see _forward_video)."""
+        return await self._forward_text(
+            chat_id, channel, sender, self._video_notice_text(channel, text, msg)
+        )
 
     async def _forward_document_retry(self, chat_id, channel, sender, text, msg) -> str:
         file_path = await tg_manager.download_media(msg)
