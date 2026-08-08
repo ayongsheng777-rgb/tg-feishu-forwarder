@@ -18,6 +18,16 @@ logger = logging.getLogger(__name__)
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
 
 
+class FeishuNotInChatError(Exception):
+    """Raised when the Feishu bot is not a member of the target chat.
+
+    Feishu API returns code 230002 ("Bot/User can NOT be out of the chat")
+    for this.  It is a *permanent* condition (the bot must be invited into
+    the group by a member) and must NOT be retried endlessly.
+    """
+
+
+
 class FeishuClient:
     """Feishu API wrapper with automatic token refresh."""
 
@@ -96,10 +106,17 @@ class FeishuClient:
         """Raise on Feishu API-level errors (HTTP 200/400 both possible).
 
         Without this, failures like code 230002 (bot not in chat) were
-        silently treated as successful sends.
+        silently treated as successful sends.  Code 230002 is raised as the
+        distinct :class:`FeishuNotInChatError` so callers can skip (not retry)
+        the message instead of failing forever.
         """
         if data.get("code") != 0:
-            raise RuntimeError(f"{action} failed: {data.get('msg')} (code={data.get('code')})")
+            code = data.get("code")
+            if code == 230002:
+                raise FeishuNotInChatError(
+                    f"{action} failed: bot not in chat (code=230002)"
+                )
+            raise RuntimeError(f"{action} failed: {data.get('msg')} (code={code})")
         return data
 
     async def send_text(self, chat_id: str, text: str) -> dict:

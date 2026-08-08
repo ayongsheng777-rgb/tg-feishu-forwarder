@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Channel, ForwardLog
 from app.services.rule_engine import rule_engine
-from app.services.feishu_client import feishu_client
+from app.services.feishu_client import feishu_client, FeishuNotInChatError
 from app.services.telegram_client import tg_manager
 from app.core.config import settings
 
@@ -83,6 +83,16 @@ class Forwarder:
             await self._log(db, channel.id, msg.id, sender_name, text, feishu_msg_id, "success", "", media_type, "")
             await self._update_last_id(db, channel.id, msg.id)
 
+        except FeishuNotInChatError as e:
+            # 永久错误：机器人不在目标群，需手动拉入。记 skipped 并推进游标，
+            # 避免补抓每 2 分钟无限重试刷屏。
+            logger.warning("Forward skipped (bot not in chat %s): %s", feishu_chat, e)
+            await self._log(
+                db, channel.id, msg.id, sender_name, text, "",
+                "skipped", "", media_type,
+                f"机器人不在目标群({feishu_chat})，请将飞书机器人加入该群后重试",
+            )
+            await self._update_last_id(db, channel.id, msg.id)
         except Exception as e:
             logger.exception("Forward failed for msg %s in channel %s", msg.id, chat_id)
             await self._log(db, channel.id, msg.id, sender_name, text, "", "failed", "", media_type, str(e))
@@ -135,7 +145,7 @@ class Forwarder:
             return await self._forward_text(chat_id, channel, sender, text)
 
         try:
-            file_key = await feishu_client.upload_file(file_path, file_type="mp4")
+            file_key = await feishu_client.upload_file(file_path, file_type="stream")
             resp = await feishu_client.send_video(chat_id, video_key="", file_key=file_key)
 
             if text:
@@ -284,6 +294,13 @@ class Forwarder:
             await db.commit()
             return {"success": True, "message": "Retry succeeded", "feishu_msg_id": feishu_msg_id}
 
+        except FeishuNotInChatError as e:
+            # 永久错误：机器人不在目标群，无需重试。记 skipped 并推进游标。
+            logger.warning("Retry skipped (bot not in chat %s): %s", channel.feishu_chat_id, e)
+            log.status = "skipped"
+            log.error_message = f"机器人不在目标群({channel.feishu_chat_id})，请将飞书机器人加入该群后重试"
+            await db.commit()
+            return {"success": False, "message": str(e)}
         except Exception as e:
             logger.exception("Retry failed for log %s", log_id)
             log.status = "failed"
@@ -310,7 +327,7 @@ class Forwarder:
         if not file_path:
             return await self._forward_text(chat_id, channel, sender, text)
         try:
-            file_key = await feishu_client.upload_file(file_path, file_type="mp4")
+            file_key = await feishu_client.upload_file(file_path, file_type="stream")
             resp = await feishu_client.send_video(chat_id, video_key="", file_key=file_key)
             if text:
                 await self._forward_text(chat_id, channel, sender, text)
@@ -404,6 +421,19 @@ class Forwarder:
                 await self._update_last_id(db, channel.id, msg.id)
                 stats["forwarded"] += 1
 
+            except FeishuNotInChatError as e:
+                # 永久错误：机器人不在目标群，无需重试。记 skipped 并推进游标。
+                logger.warning(
+                    "Manual fetch skipped (bot not in chat %s) for channel %s: %s",
+                    channel.feishu_chat_id, channel.channel_id, e,
+                )
+                await self._log(
+                    db, channel.id, msg.id, sender, text, "",
+                    "skipped", "", media_type,
+                    f"机器人不在目标群({channel.feishu_chat_id})，请将飞书机器人加入该群后重试",
+                )
+                await self._update_last_id(db, channel.id, msg.id)
+                stats["skipped"] += 1
             except Exception as e:
                 logger.exception("Manual fetch: forward failed for msg %s in channel %s", msg.id, channel.channel_id)
                 await self._log(db, channel.id, msg.id, sender, text, "", "failed", "", media_type, str(e))
