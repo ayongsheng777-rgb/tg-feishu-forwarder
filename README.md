@@ -114,6 +114,18 @@ docker compose down
 docker compose up -d --build
 ```
 
+## 全量指令测试
+
+`tools/tg_full_chain_test.py` 在 backend 容器内跑全部 TG 指令的链路测试（临时 SQLite + mock 飞书/TG/监听/采集外部依赖，零副作用）：
+
+```bash
+# 把测试脚本放进运行中的 backend 容器并执行
+docker cp tools/tg_full_chain_test.py tg-feishu-forwarder-backend-1:/tmp/
+docker compose exec -T backend sh -c "PYTHONPATH=/app python -u /tmp/tg_full_chain_test.py"
+```
+
+覆盖：全 16 组指令（`tg帮助/采集/暂停/恢复/移除/监听/监控/重启/登录/验证码/密码/补抓/订阅/清理/绑定/群列表/状态`）× 大小写前缀变体（`TG/tg/Tg/tG`）× 代表性参数，断言每条指令都能正确路由并执行、无未捕获异常。全部 PASS 才允许发布。
+
 ## 飞书应用配置
 
 1. 前往 [飞书开放平台](https://open.feishu.cn/) 创建企业自建应用
