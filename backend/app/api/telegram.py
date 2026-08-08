@@ -129,6 +129,25 @@ async def _set_listener_pref(db: AsyncSession, enabled: bool):
     await db.commit()
 
 
+async def _spawn_listener(channel_ids: list[str]) -> list[str]:
+    """Stop any running listener and start a fresh one for ``channel_ids``.
+
+    Always removes the previous handler first (via ``stop_listener``) so the
+    realtime listener hot-reloads without stacking duplicate handlers.
+    """
+    await tg_manager.stop_listener()
+
+    async def _on_message(event):
+        from app.core.database import async_session
+        async with async_session() as session:
+            await forwarder.handle_new_message(session, event)
+
+    tg_manager._listener_task = asyncio.create_task(
+        tg_manager.start_listener(channel_ids, _on_message)
+    )
+    return channel_ids
+
+
 async def start_listener_impl(db: AsyncSession) -> list[str]:
     """Start the TG listener for all enabled channels. Returns channel IDs."""
     result = await db.execute(
@@ -140,18 +159,30 @@ async def start_listener_impl(db: AsyncSession) -> list[str]:
     if not channel_ids:
         raise HTTPException(400, "No enabled channels to monitor")
 
-    # Stop existing listener if any
-    await tg_manager.stop_listener()
+    return await _spawn_listener(channel_ids)
 
-    # Start new listener as background task
-    async def _on_message(event):
-        from app.core.database import async_session
-        async with async_session() as session:
-            await forwarder.handle_new_message(session, event)
 
-    tg_manager._listener_task = asyncio.create_task(
-        tg_manager.start_listener(channel_ids, _on_message)
+async def reload_listener_impl(db: AsyncSession) -> list[str]:
+    """Hot-reload the listener with the current enabled-channel set.
+
+    Called after a channel is created / updated / deleted (e.g. paused,
+    removed) so newly added channels are watched in real time without a
+    manual restart.  Unlike ``start_listener_impl``, this does NOT raise when
+    there are no enabled channels — it simply stops the listener.
+    """
+    result = await db.execute(
+        select(Channel).where(Channel.enabled == True)
     )
+    channels = result.scalars().all()
+    channel_ids = [ch.channel_id for ch in channels]
+
+    if not channel_ids:
+        await tg_manager.stop_listener()
+        logger.info("Listener reloaded: no enabled channels, listener stopped")
+        return []
+
+    await _spawn_listener(channel_ids)
+    logger.info("Listener reloaded for %d channels", len(channel_ids))
     return channel_ids
 
 

@@ -102,6 +102,9 @@ class FeishuCommandService:
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._running = False
+        # Pending TG re-login state (driven via Feishu commands)
+        self._pending_login_phone: str = ""
+        self._pending_login_code: str = ""
 
     # ------------------------------------------------------------------
     #  Lifecycle
@@ -244,10 +247,12 @@ class FeishuCommandService:
         projects sharing the same Feishu bot.  Both ``tg采集`` and
         ``tg 采集`` are accepted.
         """
-        # Normalise: "tg 帮助" → "tg帮助", "tg 采集 新闻" → "tg采集 新闻"
+        # Normalise: case-insensitive TG prefix, with or without a space.
+        # "TG帮助" / "tg 帮助" / "Tg帮助" / "tG帮助" all become "tg帮助".
         text = text.strip()
-        if text.lower().startswith("tg "):
-            text = "tg" + text[3:]
+        m = re.match(r"^tg\s*", text, re.IGNORECASE)
+        if m:
+            text = "tg" + text[m.end():]
 
         parts = text.split()
         if not parts:
@@ -264,6 +269,50 @@ class FeishuCommandService:
         if cmd in ("tg采集", "tgfetch", "tgcollect"):
             args = parts[1:]
             await self._handle_fetch(chat_id, args)
+            return
+
+        # --- Pause / resume channel ---
+        if cmd in ("tg暂停", "tgpause"):
+            await self._handle_pause(chat_id, parts[1:], pause=True)
+            return
+        if cmd in ("tg恢复", "tgresume", "tg继续"):
+            await self._handle_pause(chat_id, parts[1:], pause=False)
+            return
+
+        # --- Remove channel ---
+        if cmd in ("tg移除", "tg删除", "tgremove", "tgdelete"):
+            await self._handle_remove(chat_id, parts[1:])
+            return
+
+        # --- Listener on/off ---
+        if cmd in ("tg监听", "tglisten"):
+            await self._handle_listener(chat_id, parts[1:])
+            return
+
+        # --- Restart system ---
+        if cmd in ("tg重启", "tg重启系统", "tgrestart"):
+            await self._handle_restart(chat_id)
+            return
+
+        # --- TG re-login flow (driven from Feishu) ---
+        if cmd in ("tg登录", "tglogin"):
+            await self._handle_login(chat_id, parts[1:])
+            return
+        if cmd in ("tg验证码", "tgcode"):
+            await self._handle_code(chat_id, parts[1:])
+            return
+        if cmd in ("tg密码", "tgpwd"):
+            await self._handle_password(chat_id, parts[1:])
+            return
+
+        # --- Catch-up interval setting ---
+        if cmd in ("tg补抓", "tgcatchup"):
+            await self._handle_catchup_interval(chat_id, parts[1:])
+            return
+
+        # --- Subscribe to a TG channel + bind forward group (root fix) ---
+        if cmd in ("tg订阅", "tgsub", "tg关注", "tgjoin"):
+            await self._handle_subscribe(chat_id, parts[1:])
             return
 
         # --- Bind group name -> chat ID ---
@@ -519,27 +568,368 @@ class FeishuCommandService:
             logger.exception("Feishu command: fetch failed")
             await feishu_client.send_text(chat_id, f"❌ 采集失败: {e}")
 
+    # ------------------------------------------------------------------
+    #  Channel management: pause / resume / remove
+    # ------------------------------------------------------------------
+
+    async def _resolve_channel(self, db, name: str):
+        """Fuzzy-match a channel by title / username / id (case-insensitive)."""
+        from sqlalchemy import select
+        from app.models import Channel
+
+        kw = name.lower().strip()
+        result = await db.execute(select(Channel))
+        channels = result.scalars().all()
+        for ch in channels:
+            if kw == str(ch.channel_id):
+                return ch
+        for ch in channels:
+            if kw in (ch.channel_title or "").lower() or kw in (ch.channel_username or "").lower():
+                return ch
+        return None
+
+    async def _handle_pause(self, chat_id: str, args: list[str], pause: bool):
+        """tg暂停 <频道名> / tg恢复 <频道名> — toggle channel.enabled + reload."""
+        if not args:
+            await feishu_client.send_text(chat_id, "❌ 用法: tg暂停 <频道名> / tg恢复 <频道名>")
+            return
+        name = " ".join(args).strip()
+        from app.core.database import async_session
+        from app.api.telegram import reload_listener_impl
+
+        try:
+            async with async_session() as db:
+                ch = await self._resolve_channel(db, name)
+                if not ch:
+                    await feishu_client.send_text(chat_id, f"❌ 未找到频道「{name}」")
+                    return
+                title = ch.channel_title or ch.channel_username or ch.channel_id
+                ch.enabled = not pause
+                await db.commit()
+                await reload_listener_impl(db)
+            state = "已暂停（不再转发）" if pause else "已恢复（实时转发恢复）"
+            await feishu_client.send_text(chat_id, f"✅ {title}：{state}")
+        except Exception as e:
+            logger.exception("pause/resume failed")
+            await feishu_client.send_text(chat_id, f"❌ 操作失败: {e}")
+
+    async def _handle_remove(self, chat_id: str, args: list[str]):
+        """tg移除 <频道名> — delete a channel from the DB + reload listener."""
+        if not args:
+            await feishu_client.send_text(chat_id, "❌ 用法: tg移除 <频道名>")
+            return
+        name = " ".join(args).strip()
+        from app.core.database import async_session
+        from app.api.telegram import reload_listener_impl
+
+        try:
+            async with async_session() as db:
+                ch = await self._resolve_channel(db, name)
+                if not ch:
+                    await feishu_client.send_text(chat_id, f"❌ 未找到频道「{name}」")
+                    return
+                title = ch.channel_title or ch.channel_username or ch.channel_id
+                await db.delete(ch)
+                await db.commit()
+                await reload_listener_impl(db)
+            await feishu_client.send_text(chat_id, f"🗑 已移除频道: {title}")
+        except Exception as e:
+            logger.exception("remove channel failed")
+            await feishu_client.send_text(chat_id, f"❌ 移除失败: {e}")
+
+    # ------------------------------------------------------------------
+    #  Listener on/off + system restart
+    # ------------------------------------------------------------------
+
+    async def _handle_listener(self, chat_id: str, args: list[str]):
+        """tg监听 开启 / tg监听 关闭 — start or stop the realtime listener."""
+        from app.core.database import async_session
+        from app.api.telegram import start_listener_impl, _set_listener_pref
+        from app.services.telegram_client import tg_manager
+
+        arg = (args[0].lower() if args else "")
+        on = arg in ("开", "开启", "on", "start", "1", "true", "yes")
+        off = arg in ("关", "关闭", "off", "stop", "0", "false", "no")
+
+        if not arg or (not on and not off):
+            running = tg_manager._listener_task is not None and not tg_manager._listener_task.done()
+            state = "运行中" if running else "已停止"
+            await feishu_client.send_text(
+                chat_id,
+                f"🔈 当前监听状态: {state}\n用法: tg监听 开启 / tg监听 关闭",
+            )
+            return
+
+        try:
+            async with async_session() as db:
+                if on:
+                    channel_ids = await start_listener_impl(db)
+                    await _set_listener_pref(db, True)
+                    await feishu_client.send_text(chat_id, f"✅ 监听已开启，监控 {len(channel_ids)} 个频道")
+                else:
+                    await tg_manager.stop_listener()
+                    await _set_listener_pref(db, False)
+                    await feishu_client.send_text(chat_id, "⏸ 监听已停止")
+        except Exception as e:
+            logger.exception("listener toggle failed")
+            await feishu_client.send_text(chat_id, f"❌ 操作失败: {e}")
+
+    async def _handle_restart(self, chat_id: str):
+        """tg重启 / tg重启系统 — exit the backend process; Docker auto-restarts."""
+        await feishu_client.send_text(chat_id, "🔄 正在重启系统，约 10~30 秒后恢复…")
+        import os
+        import threading
+
+        def _delayed_exit(delay: float = 1.5):
+            time.sleep(delay)
+            logger.warning("Restart triggered via Feishu command — exiting process, Docker will auto-restart.")
+            os._exit(0)
+
+        threading.Thread(target=_delayed_exit, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    #  TG re-login flow (driven entirely from Feishu)
+    # ------------------------------------------------------------------
+
+    async def _handle_login(self, chat_id: str, args: list[str]):
+        """tg登录 <手机号> — send login code via Telegram."""
+        if not args:
+            await feishu_client.send_text(chat_id, "❌ 用法: tg登录 <手机号>，如 tg登录 +8613800138000")
+            return
+        phone = args[0].strip()
+        from app.services.telegram_client import tg_manager
+
+        try:
+            await tg_manager.start_login(phone)
+            self._pending_login_phone = phone
+            self._pending_login_code = ""
+            await feishu_client.send_text(chat_id, f"✅ 验证码已发送至 {phone}\n请回复：tg验证码 <6位验证码>")
+        except Exception as e:
+            logger.exception("tg login start failed")
+            await feishu_client.send_text(chat_id, f"❌ 发送验证码失败: {e}")
+
+    async def _handle_code(self, chat_id: str, args: list[str]):
+        """tg验证码 <code> — complete login (or prompt for 2FA password)."""
+        if not args:
+            await feishu_client.send_text(chat_id, "❌ 用法: tg验证码 <6位验证码>")
+            return
+        code = args[0].strip()
+        phone = self._pending_login_phone
+        if not phone:
+            await feishu_client.send_text(chat_id, "❌ 请先发送 tg登录 <手机号> 获取验证码")
+            return
+        from app.services.telegram_client import tg_manager
+        from app.core.database import async_session
+        from app.api.telegram import reload_listener_impl
+
+        try:
+            res = await tg_manager.complete_login(phone, code)
+            if res.get("success"):
+                self._pending_login_phone = ""
+                self._pending_login_code = ""
+                try:
+                    async with async_session() as db:
+                        await reload_listener_impl(db)
+                except Exception:
+                    logger.warning("reload after login failed")
+                await feishu_client.send_text(chat_id, "✅ 登录成功，实时监听已重载")
+            elif res.get("need_password"):
+                self._pending_login_code = code
+                await feishu_client.send_text(chat_id, "🔐 需要两步验证密码，请回复：tg密码 <密码>")
+            else:
+                await feishu_client.send_text(chat_id, f"❌ 登录失败: {res.get('message')}")
+        except Exception as e:
+            logger.exception("tg code failed")
+            await feishu_client.send_text(chat_id, f"❌ 登录失败: {e}")
+
+    async def _handle_password(self, chat_id: str, args: list[str]):
+        """tg密码 <密码> — finish 2FA login, then reload the listener."""
+        if not args:
+            await feishu_client.send_text(chat_id, "❌ 用法: tg密码 <两步验证密码>")
+            return
+        pwd = " ".join(args).strip()
+        phone = self._pending_login_phone
+        if not phone:
+            await feishu_client.send_text(chat_id, "❌ 请先发送 tg登录 <手机号> 获取验证码")
+            return
+        from app.services.telegram_client import tg_manager
+        from app.core.database import async_session
+        from app.api.telegram import reload_listener_impl
+
+        try:
+            res = await tg_manager.complete_login(phone, self._pending_login_code, pwd)
+            if res.get("success"):
+                self._pending_login_phone = ""
+                self._pending_login_code = ""
+                try:
+                    async with async_session() as db:
+                        await reload_listener_impl(db)
+                except Exception:
+                    logger.warning("reload after 2FA login failed")
+                await feishu_client.send_text(chat_id, "✅ 登录成功（含两步验证），实时监听已重载")
+            else:
+                await feishu_client.send_text(chat_id, f"❌ 登录失败: {res.get('message')}")
+        except Exception as e:
+            logger.exception("tg password failed")
+            await feishu_client.send_text(chat_id, f"❌ 登录失败: {e}")
+
+    # ------------------------------------------------------------------
+    #  Catch-up interval setting
+    # ------------------------------------------------------------------
+
+    async def _handle_catchup_interval(self, chat_id: str, args: list[str]):
+        """tg补抓 <分钟> — set periodic catch-up interval (0 = off)."""
+        from app.core.database import async_session
+        from app.models import Setting
+        from sqlalchemy import select
+
+        if not args:
+            async with async_session() as db:
+                cur = "2"
+                r = await db.execute(select(Setting).where(Setting.key == "catchup_interval_minutes"))
+                s = r.scalar_one_or_none()
+                if s and s.value:
+                    cur = s.value
+            await feishu_client.send_text(
+                chat_id, f"⏱ 当前补抓间隔: {cur} 分钟（0=关闭）\n用法: tg补抓 <分钟>"
+            )
+            return
+
+        try:
+            minutes = int(args[0].strip())
+        except ValueError:
+            await feishu_client.send_text(chat_id, "❌ 间隔应为整数分钟（0=关闭）")
+            return
+        if minutes < 0 or minutes > 180:
+            await feishu_client.send_text(chat_id, "❌ 间隔范围 0~180 分钟")
+            return
+
+        async with async_session() as db:
+            r = await db.execute(select(Setting).where(Setting.key == "catchup_interval_minutes"))
+            s = r.scalar_one_or_none()
+            if not s:
+                s = Setting(key="catchup_interval_minutes", value=str(minutes))
+                db.add(s)
+            else:
+                s.value = str(minutes)
+            await db.commit()
+
+        label = "已关闭" if minutes == 0 else f"每 {minutes} 分钟"
+        await feishu_client.send_text(chat_id, f"✅ 周期补抓{label}")
+
+    async def _handle_subscribe(self, chat_id: str, args: list[str]):
+        """tg订阅 <频道名/@用户名> <群名称> — join a TG channel + bind forward group.
+
+        This is the *root fix* for the "followed but zero realtime forwarding"
+        problem: the TG account must actually be a member of the channel for
+        Telegram to push realtime updates.  The command joins the channel via
+        Telethon and binds it to the named Feishu group in one step.
+        """
+        if len(args) < 2:
+            await feishu_client.send_text(
+                chat_id,
+                "❌ 用法: tg订阅 <频道名或@用户名> <群名称>\n"
+                "例: tg订阅 财联社电报 新闻转发群\n"
+                "    tg订阅 @cailianpress 科技快讯",
+            )
+            return
+
+        channel_arg = args[0].strip()
+        group_name = " ".join(args[1:]).strip()
+
+        from app.core.database import async_session
+        from app.services import alias_resolver
+        from app.services.telegram_client import tg_manager
+        from app.api.telegram import reload_listener_impl
+        from app.models import Channel
+
+        try:
+            async with async_session() as db:
+                # 1) Resolve the Feishu group name -> chat id (must already be bound)
+                alias = await alias_resolver.resolve_name(db, group_name)
+                if not alias:
+                    await feishu_client.send_text(
+                        chat_id,
+                        f"❌ 未找到群「{group_name}」的绑定\n"
+                        f"请先用 tg绑定 {group_name} <飞书群ID> 建立绑定",
+                    )
+                    return
+                group_chat_id = alias.feishu_chat_id
+
+                # 2) Find an existing channel (reuse stored id/username), else join fresh
+                ch = await self._resolve_channel(db, channel_arg)
+                join_arg = channel_arg
+                if ch:
+                    join_arg = ch.channel_username or ch.channel_id
+
+                # 3) Join the TG channel — this is what enables realtime pushes
+                await feishu_client.send_text(
+                    chat_id, f"⏳ 正在订阅频道「{channel_arg}」并加入实时监听..."
+                )
+                res = await tg_manager.join_channel(join_arg)
+                if not res.get("ok"):
+                    await feishu_client.send_text(chat_id, f"❌ {res.get('message')}")
+                    return
+
+                # 4) Create or update the channel row, bound to the group
+                if ch:
+                    ch.feishu_chat_id = group_chat_id
+                    ch.enabled = True
+                    title = ch.channel_title or res.get("title") or channel_arg
+                else:
+                    ch = Channel(
+                        channel_id=res["channel_id"],
+                        channel_title=res.get("title"),
+                        channel_username=res.get("username"),
+                        feishu_chat_id=group_chat_id,
+                        enabled=True,
+                    )
+                    db.add(ch)
+                    title = res.get("title") or channel_arg
+                await db.commit()
+                await reload_listener_impl(db)
+
+            await feishu_client.send_text(
+                chat_id,
+                f"✅ 已订阅频道「{title}」并绑定转发到群「{group_name}」\n"
+                "🔔 实时监听已开启，新消息将自动推送（周期补抓仍作兜底）",
+            )
+        except Exception as e:
+            logger.exception("tg subscribe failed")
+            await feishu_client.send_text(chat_id, f"❌ 订阅失败: {e}")
+
     async def _send_help(self, chat_id: str):
         """Send the help message."""
         help_text = (
             "📋 青鸟采集命令\n\n"
-            "1. tg采集 — 采集所有频道的未转发消息\n"
-            "2. tg采集 <频道名> — 采集指定频道\n"
-            "3. tg采集 <群名称> — 按群绑定采集（如: tg采集 科技）\n"
-            "4. tg采集 <日期> — 按日期采集所有频道\n"
-            "   例: tg采集 2026-07-28\n"
-            "5. tg采集 <开始> <结束> — 按日期范围采集\n"
-            "   例: tg采集 2026-07-25 2026-07-28\n"
-            "6. tg采集 <名称> <日期> — 按日期采集指定频道/群\n"
-            "   例: tg采集 新闻 2026-07-28\n"
-            "7. tg采集 <名称> <开始> <结束> — 按日期范围采集指定频道/群\n"
-            "8. tg绑定 <名称> <群ID> — 绑定群名称到飞书群\n"
-            "   例: tg绑定 科技 oc_a8797b4b11f1398ca1cc818a645efbe1\n"
-            "9. tg群列表 — 查看所有群名称绑定\n"
-            "10. tg状态 [群名称] — 发送运行状态报告（默认发到当前群）\n"
-            "11. tg帮助 — 显示此帮助信息\n\n"
-            "💡 频道名/群名称支持模糊匹配；机器人所在群会自动识别登记；\n"
-            "日期支持 YYYY-MM-DD 或 MM-DD 格式"
+            "💡 所有命令以 tg 为前缀，前缀大小写随意（TG帮助 / tg 帮助 / Tg帮助 均可）\n\n"
+            "【采集】\n"
+            "· tg采集 — 采集所有频道的未转发消息\n"
+            "· tg采集 <频道名> — 采集指定频道（标题/用户名模糊匹配）\n"
+            "· tg采集 <群名称> — 按群绑定采集（如: tg采集 科技）\n"
+            "· tg采集 <日期> — 按日期采集所有频道（YYYY-MM-DD 或 MM-DD）\n"
+            "· tg采集 <开始> <结束> — 按日期范围采集\n"
+            "· tg采集 <名称> <日期> — 按日期采集指定频道/群\n\n"
+            "【频道管理】\n"
+            "· tg订阅 <频道名> <群名称> — 加入并订阅频道 + 绑定转发群（根治零转发）\n"
+            "· tg暂停 <频道名> — 暂停该频道转发\n"
+            "· tg恢复 <频道名> — 恢复已暂停的频道\n"
+            "· tg移除 <频道名> — 从系统中删除频道\n\n"
+            "【监听与系统】\n"
+            "· tg监听 — 查看实时监听状态\n"
+            "· tg监听 开启 / tg监听 关闭 — 开启/关闭实时监听\n"
+            "· tg重启 — 重启后端服务（Docker 自动拉起）\n"
+            "· tg补抓 <分钟> — 周期补抓间隔（0=关闭，默认 2 分钟；无参数查看当前值）\n\n"
+            "【Telegram 登录（掉线重登）】\n"
+            "· tg登录 <手机号> — 发送登录验证码到 TG（如: tg登录 +8613800138000）\n"
+            "· tg验证码 <6位码> — 输入验证码完成登录\n"
+            "· tg密码 <两步验证密码> — 2FA 密码登录（验证码后提示需要时使用）\n\n"
+            "【其他】\n"
+            "· tg绑定 <名称> <群ID> — 绑定群名到飞书群\n"
+            "· tg群列表 — 查看所有群名称绑定\n"
+            "· tg状态 [群名称] — 发送运行状态报告（默认发到当前群）\n"
+            "· tg帮助 — 显示此帮助信息\n\n"
+            "⚠️ Telegram 连接断开会主动推送到飞书，届时可按上方「登录」流程重登。"
         )
         await feishu_client.send_text(chat_id, help_text)
 

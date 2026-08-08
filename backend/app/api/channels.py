@@ -24,6 +24,12 @@ async def create_channel(data: ChannelCreate, db: AsyncSession = Depends(get_db)
     db.add(ch)
     await db.commit()
     await db.refresh(ch)
+    # Hot-reload the realtime listener so the new channel is watched immediately
+    try:
+        from app.api.telegram import reload_listener_impl
+        await reload_listener_impl(db)
+    except Exception:
+        logger.warning("Failed to reload listener after channel create", exc_info=True)
     return ch
 
 
@@ -33,10 +39,19 @@ async def update_channel(channel_id: int, data: ChannelUpdate, db: AsyncSession 
     ch = result.scalar_one_or_none()
     if not ch:
         raise HTTPException(404, "Channel not found")
-    for k, v in data.model_dump(exclude_unset=True).items():
+    # Capture what changed so we only reload when it affects monitoring
+    changed = data.model_dump(exclude_unset=True)
+    for k, v in changed.items():
         setattr(ch, k, v)
     await db.commit()
     await db.refresh(ch)
+    # Reload the listener when enabled-state or the TG channel id changes
+    if "enabled" in changed or "channel_id" in changed:
+        try:
+            from app.api.telegram import reload_listener_impl
+            await reload_listener_impl(db)
+        except Exception:
+            logger.warning("Failed to reload listener after channel update", exc_info=True)
     return ch
 
 
@@ -48,6 +63,12 @@ async def delete_channel(channel_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Channel not found")
     await db.delete(ch)
     await db.commit()
+    # Hot-reload the listener so the removed channel is dropped immediately
+    try:
+        from app.api.telegram import reload_listener_impl
+        await reload_listener_impl(db)
+    except Exception:
+        logger.warning("Failed to reload listener after channel delete", exc_info=True)
     return {"ok": True}
 
 

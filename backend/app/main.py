@@ -66,6 +66,10 @@ async def lifespan(app: FastAPI):
     from app.services.status_reporter import report_scheduler
     report_scheduler.start()
 
+    # Start periodic catch-up sweep + TG health watchdog
+    from app.services.catchup_scheduler import catchup_scheduler
+    catchup_scheduler.start()
+
     # Auto-start the TG listener unless the user explicitly turned it off.
     # Default = ON ("监听运行是自动打开状态"); the dashboard toggle persists
     # the preference to the `listener_enabled` setting.
@@ -79,6 +83,7 @@ async def lifespan(app: FastAPI):
     from app.services.feishu_client import feishu_client
     await feishu_command.stop()
     await report_scheduler.stop()
+    await catchup_scheduler.stop()
     await tg_manager.disconnect()
     await feishu_client.close()
     logger.info("Shutdown complete")

@@ -15,6 +15,7 @@ from telethon import TelegramClient, events
 from telethon.tl.types import Channel, Chat, PeerChannel
 from telethon.tl.functions.messages import GetDialogsRequest
 from telethon.tl.functions.channels import GetChannelsRequest
+from telethon.errors import SessionPasswordNeededError
 
 from app.core.config import settings
 
@@ -30,6 +31,10 @@ class TelegramManager:
     _instance: "TelegramManager | None" = None
     _client: TelegramClient | None = None
     _listener_task: asyncio.Task | None = None
+    _msg_handler = None          # current events.NewMessage handler (for clean removal)
+    _disconnect_handler = None   # events.Disconnected handler
+    _connect_handler = None      # events.Connected handler
+    _disconnect_notified = False # rate-limit: only notify recovery after a drop
 
     def __new__(cls):
         if cls._instance is None:
@@ -92,11 +97,23 @@ class TelegramManager:
         return "code_sent"
 
     async def complete_login(self, phone: str, code: str, password: str = "") -> dict:
-        """Complete login with the code (and 2FA password if required)."""
+        """Complete login with the code (and 2FA password if required).
+
+        Returns ``{"success": True, ...}`` on success, or
+        ``{"success": False, "need_password": True, ...}`` when Telegram
+        requires a two-step verification password (so the caller can prompt
+        the user for ``tg密码 <密码>`` and retry).
+        """
         client = self._get_client()
         try:
-            await client.sign_in(phone=phone, code=code, password=password or None)
+            if password:
+                # 2FA step — complete with the account password only
+                await client.sign_in(password=password)
+            else:
+                await client.sign_in(phone=phone, code=code)
             return {"success": True, "message": "Login successful"}
+        except SessionPasswordNeededError:
+            return {"success": False, "need_password": True, "message": "需要两步验证密码"}
         except Exception as e:
             return {"success": False, "message": str(e)}
 
@@ -126,6 +143,55 @@ class TelegramManager:
     # ------------------------------------------------------------------
     #  Channel discovery
     # ------------------------------------------------------------------
+
+    async def join_channel(self, identifier: str) -> dict:
+        """Join a public TG channel and return its resolved info.
+
+        ``identifier`` may be a username (with or without ``@``), a
+        ``https://t.me/...`` link, or a raw channel ID.  Joining is the
+        *root fix* for the "followed but zero realtime forwarding" problem:
+        Telegram only pushes ``UpdateNewChannelMessage`` to channel
+        participants, so the account must actually be a member.
+
+        Returns ``{"ok": True, "channel_id": str, "title": str,
+        "username": str|None}`` on success, or
+        ``{"ok": False, "message": str}`` on failure.
+        """
+        client = self._get_client()
+        if not client.is_connected():
+            await client.connect()
+
+        from telethon.tl.functions.channels import JoinChannelRequest
+        from telethon.tl.types import PeerChannel
+
+        # Resolve the identifier to an entity input Telethon can fetch.
+        target = identifier
+        try:
+            if identifier.lstrip("-").isdigit():
+                target = PeerChannel(int(identifier))
+            entity = await client.get_entity(target)
+        except Exception as e:
+            return {"ok": False, "message": f"无法解析频道「{identifier}」：{e}"}
+
+        try:
+            await client(JoinChannelRequest(entity))
+        except Exception as e:
+            em = str(e)
+            # Already a participant is fine — we only need membership for pushes
+            if "ALREADY" in em.upper() or "participant" in em.lower():
+                pass
+            else:
+                logger.warning("join channel %s failed: %s", identifier, e)
+                return {"ok": False, "message": f"加入频道失败：{e}"}
+
+        return {
+            "ok": True,
+            "channel_id": str(entity.id),
+            "title": getattr(entity, "title", None)
+            or getattr(entity, "username", None)
+            or str(entity.id),
+            "username": getattr(entity, "username", None),
+        }
 
     async def list_dialogs(self) -> list[dict]:
         """List all dialogs (channels, chats, users) the account has joined."""
@@ -178,12 +244,51 @@ class TelegramManager:
             except Exception:
                 logger.exception("Error in message handler for chat %s", chat_id)
 
+        # Keep a reference so stop_listener() can remove it (avoids the
+        # duplicate-handler accumulation bug across restarts).
+        self._msg_handler = _handler
+
+        # Disconnect / reconnect notifications (reliable TG drop detection).
+        # Registered per start; removed in stop_listener() to avoid stacking.
+        @client.on(events.Disconnected())
+        async def _on_disconnected():
+            logger.warning("TG connection lost (Disconnected event)")
+            self._disconnect_notified = True
+            try:
+                await self._notify_disconnect()
+            except Exception:
+                logger.warning("notify disconnect failed", exc_info=True)
+
+        self._disconnect_handler = _on_disconnected
+
+        @client.on(events.Connected())
+        async def _on_connected():
+            if self._disconnect_notified:
+                self._disconnect_notified = False
+                logger.info("TG connection restored (Connected event)")
+                try:
+                    await self._notify_connect()
+                except Exception:
+                    logger.warning("notify connect failed", exc_info=True)
+
+        self._connect_handler = _on_connected
+
         logger.info("TG listener registered for channels: %s", channel_ids)
         # Keep the client running
         await client.run_until_disconnected()
 
     async def stop_listener(self):
-        """Stop the background listener."""
+        """Stop the background listener and remove its event handlers."""
+        client = self._client
+        # Remove registered handlers so repeated starts don't stack them up
+        for attr in ("_msg_handler", "_disconnect_handler", "_connect_handler"):
+            handler = getattr(self, attr, None)
+            if handler is not None and client is not None:
+                try:
+                    client.remove_event_handler(handler)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
         if self._listener_task and not self._listener_task.done():
             self._listener_task.cancel()
             try:
@@ -191,6 +296,40 @@ class TelegramManager:
             except asyncio.CancelledError:
                 pass
         self._listener_task = None
+
+    async def _report_chat_id(self) -> str:
+        """Read the configured report target group from the DB settings."""
+        from app.core.database import async_session
+        from app.models import Setting
+        from sqlalchemy import select
+
+        try:
+            async with async_session() as db:
+                r = await db.execute(select(Setting).where(Setting.key == "report_chat_id"))
+                s = r.scalar_one_or_none()
+                return s.value if s and s.value else ""
+        except Exception:
+            return ""
+
+    async def _notify_disconnect(self):
+        from app.services.feishu_client import feishu_client
+
+        chat_id = await self._report_chat_id()
+        if not chat_id:
+            return
+        await feishu_client.send_text(
+            chat_id,
+            "⚠️ Telegram 连接已断开，实时消息监听暂停。\n"
+            "若长时间未恢复，请重新登录：tg登录 <手机号>",
+        )
+
+    async def _notify_connect(self):
+        from app.services.feishu_client import feishu_client
+
+        chat_id = await self._report_chat_id()
+        if not chat_id:
+            return
+        await feishu_client.send_text(chat_id, "✅ Telegram 连接已恢复，实时监听继续。")
 
     async def download_media(self, message, file_path: str | None = None) -> str | None:
         """Download media from a message. Returns the local file path or None."""
