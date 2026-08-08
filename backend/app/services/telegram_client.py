@@ -32,9 +32,6 @@ class TelegramManager:
     _client: TelegramClient | None = None
     _listener_task: asyncio.Task | None = None
     _msg_handler = None          # current events.NewMessage handler (for clean removal)
-    _disconnect_handler = None   # events.Disconnected handler
-    _connect_handler = None      # events.Connected handler
-    _disconnect_notified = False # rate-limit: only notify recovery after a drop
 
     def __new__(cls):
         if cls._instance is None:
@@ -248,31 +245,6 @@ class TelegramManager:
         # duplicate-handler accumulation bug across restarts).
         self._msg_handler = _handler
 
-        # Disconnect / reconnect notifications (reliable TG drop detection).
-        # Registered per start; removed in stop_listener() to avoid stacking.
-        @client.on(events.Disconnected())
-        async def _on_disconnected():
-            logger.warning("TG connection lost (Disconnected event)")
-            self._disconnect_notified = True
-            try:
-                await self._notify_disconnect()
-            except Exception:
-                logger.warning("notify disconnect failed", exc_info=True)
-
-        self._disconnect_handler = _on_disconnected
-
-        @client.on(events.Connected())
-        async def _on_connected():
-            if self._disconnect_notified:
-                self._disconnect_notified = False
-                logger.info("TG connection restored (Connected event)")
-                try:
-                    await self._notify_connect()
-                except Exception:
-                    logger.warning("notify connect failed", exc_info=True)
-
-        self._connect_handler = _on_connected
-
         logger.info("TG listener registered for channels: %s", channel_ids)
         # Keep the client running
         await client.run_until_disconnected()
@@ -281,14 +253,13 @@ class TelegramManager:
         """Stop the background listener and remove its event handlers."""
         client = self._client
         # Remove registered handlers so repeated starts don't stack them up
-        for attr in ("_msg_handler", "_disconnect_handler", "_connect_handler"):
-            handler = getattr(self, attr, None)
-            if handler is not None and client is not None:
-                try:
-                    client.remove_event_handler(handler)
-                except Exception:
-                    pass
-                setattr(self, attr, None)
+        handler = getattr(self, "_msg_handler", None)
+        if handler is not None and client is not None:
+            try:
+                client.remove_event_handler(handler)
+            except Exception:
+                pass
+            self._msg_handler = None
         if self._listener_task and not self._listener_task.done():
             self._listener_task.cancel()
             try:
@@ -310,26 +281,6 @@ class TelegramManager:
                 return s.value if s and s.value else ""
         except Exception:
             return ""
-
-    async def _notify_disconnect(self):
-        from app.services.feishu_client import feishu_client
-
-        chat_id = await self._report_chat_id()
-        if not chat_id:
-            return
-        await feishu_client.send_text(
-            chat_id,
-            "⚠️ Telegram 连接已断开，实时消息监听暂停。\n"
-            "若长时间未恢复，请重新登录：tg登录 <手机号>",
-        )
-
-    async def _notify_connect(self):
-        from app.services.feishu_client import feishu_client
-
-        chat_id = await self._report_chat_id()
-        if not chat_id:
-            return
-        await feishu_client.send_text(chat_id, "✅ Telegram 连接已恢复，实时监听继续。")
 
     async def download_media(self, message, file_path: str | None = None) -> str | None:
         """Download media from a message. Returns the local file path or None."""

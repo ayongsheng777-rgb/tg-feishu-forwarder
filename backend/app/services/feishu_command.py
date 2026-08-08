@@ -659,9 +659,10 @@ class FeishuCommandService:
         if not arg or (not on and not off):
             running = tg_manager._listener_task is not None and not tg_manager._listener_task.done()
             state = "运行中" if running else "已停止"
+            note = "" if running else "（如仍在收消息，是补抓调度在兜底投递）"
             await feishu_client.send_text(
                 chat_id,
-                f"🔈 当前监听状态: {state}\n用法: tg监听 开启 / tg监听 关闭（tg监控 等同）",
+                f"🔈 当前监听状态: {state}{note}\n用法: tg监听 开启 / tg监听 关闭（tg监控 等同）",
             )
             return
 
@@ -670,7 +671,25 @@ class FeishuCommandService:
                 if on:
                     channel_ids = await start_listener_impl(db)
                     await _set_listener_pref(db, True)
-                    await feishu_client.send_text(chat_id, f"✅ 监听已开启，监控 {len(channel_ids)} 个频道")
+                    # 先等任务真正连上再回执，避免发假成功
+                    await asyncio.sleep(2)
+                    t = tg_manager._listener_task
+                    alive = t is not None and not t.done() and tg_manager.is_connected
+                    if alive:
+                        await feishu_client.send_text(
+                            chat_id, f"✅ 监听已开启，实时运行中，监控 {len(channel_ids)} 个频道"
+                        )
+                    else:
+                        err = ""
+                        if t is not None and t.done():
+                            try:
+                                t.exception()
+                            except Exception as ex:
+                                err = f"：{ex}"
+                        await feishu_client.send_text(
+                            chat_id,
+                            f"⚠️ 已请求开启监听，但实时任务未就绪{err}（补抓调度仍在兜底投递，稍后自动重试拉起）",
+                        )
                 else:
                     await tg_manager.stop_listener()
                     await _set_listener_pref(db, False)

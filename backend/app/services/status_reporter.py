@@ -56,6 +56,21 @@ async def build_report(db) -> str:
     except Exception:
         tg_ok, tg_user = False, ""
 
+    # 补抓调度是否开启（作为实时监听的兜底）
+    catchup_on = False
+    try:
+        ci = await _get_setting(db, "catchup_interval_minutes", "2")
+        catchup_on = (int(ci) if ci else 0) > 0
+    except (ValueError, Exception):
+        catchup_on = False
+
+    if listener_running:
+        listener_state = "✅ 实时运行中"
+    elif catchup_on:
+        listener_state = "⚠️ 实时已停（补抓保底投递中）"
+    else:
+        listener_state = "⏸ 已停止"
+
     # --- channels ---
     total_ch = await db.scalar(select(func.count(Channel.id))) or 0
     enabled_ch = await db.scalar(
@@ -95,7 +110,11 @@ async def build_report(db) -> str:
     )
     recent_errors = result.scalars().all()
 
-    overall = "🟢 正常" if (listener_running and tg_ok) else ("🟠 异常" if tg_ok else "🔴 阻断")
+    overall = (
+        "🟢 正常"
+        if (listener_running and tg_ok)
+        else ("🟠 实时监听降级" if (catchup_on and tg_ok) else ("🟠 异常" if tg_ok else "🔴 阻断"))
+    )
 
     lines = [
         f"📊 青鸟 · 运行状态报告",
@@ -104,7 +123,7 @@ async def build_report(db) -> str:
         f"总体状态: {overall}",
         f"运行时长: {_fmt_uptime()}",
         f"TG 连接: {'✅ 已连接' + (f'（{tg_user}）' if tg_user else '') if tg_ok else '❌ 未连接'}",
-        f"消息监听: {'✅ 运行中' if listener_running else '⏸ 已停止'}",
+        f"消息监听: {listener_state}",
         f"监控频道: {enabled_ch} 启用 / {total_ch} 总计",
         "",
         f"📈 近24小时: 成功 {day_ok} | 失败 {day_fail} | 跳过 {day_skip}",

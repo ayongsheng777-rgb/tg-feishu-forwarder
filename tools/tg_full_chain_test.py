@@ -57,7 +57,12 @@ fc_mod.feishu_client.send_text = fake_send
 fc_mod.feishu_client.get_chat_name = AsyncMock(return_value="测试群")
 
 tg_mgr = MagicMock()
-tg_mgr._listener_task = None
+# 模拟一个"正在运行"的监听任务，使 tg监听 开启 走成功回执分支
+_running_task = MagicMock()
+_running_task.done.return_value = False
+_running_task.cancelled.return_value = False
+tg_mgr._listener_task = _running_task
+tg_mgr.is_connected = True
 tg_mgr.join_channel = AsyncMock(return_value={"ok": True, "channel_id": 999003, "title": "新频道", "username": "newc"})
 tg_mgr.start_login = AsyncMock()
 tg_mgr.complete_login = AsyncMock(return_value={"success": True})

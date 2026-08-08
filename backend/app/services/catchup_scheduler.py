@@ -101,33 +101,59 @@ class CatchupScheduler:
                 authorized = False
         ok = connected and authorized
 
-        if not ok and not self._tg_down:
-            self._tg_down = True
-            if report_chat:
-                try:
-                    await feishu_client.send_text(
-                        report_chat,
-                        "⚠️ Telegram 连接已断开或登录失效，实时监听暂停。\n"
-                        "如需重新登录，请在飞书发送：tg登录 <手机号>",
-                    )
-                except Exception:
-                    logger.warning("notify tg-down failed", exc_info=True)
-        elif ok and self._tg_down:
+        if not ok:
+            if not self._tg_down:
+                self._tg_down = True
+                if report_chat:
+                    try:
+                        await feishu_client.send_text(
+                            report_chat,
+                            "⚠️ Telegram 连接已断开或登录失效，实时监听暂停。\n"
+                            "如需重新登录，请在飞书发送：tg登录 <手机号>",
+                        )
+                    except Exception:
+                        logger.warning("notify tg-down failed", exc_info=True)
+            return  # TG 不可用时不要尝试拉起监听，等恢复后再说
+
+        # TG 已连接且已授权
+        if self._tg_down:
             self._tg_down = False
             if report_chat:
                 try:
                     await feishu_client.send_text(report_chat, "✅ Telegram 连接已恢复，实时监听继续。")
                 except Exception:
                     logger.warning("notify tg-up failed", exc_info=True)
-            # Reload the listener so it's definitely running on the restored session
-            try:
-                from app.api.telegram import reload_listener_impl
-                from app.core.database import async_session
 
-                async with async_session() as sdb:
-                    await reload_listener_impl(sdb)
-            except Exception:
-                logger.warning("reload after tg recovery failed", exc_info=True)
+        # 实时监听存活自检：用户开启过监听但任务已死，自动拉起，
+        # 避免"状态显示停止"却因补抓仍在投递而误以为正常的矛盾。
+        try:
+            await self._ensure_listener_running(tg_manager)
+        except Exception:
+            logger.warning("listener auto-restart failed", exc_info=True)
+
+    async def _ensure_listener_running(self, tg_manager) -> None:
+        """Restart the realtime listener when it should be on but is dead.
+
+        Uses the persisted ``listener_enabled`` preference as the source of
+        truth: if the user asked for realtime monitoring but the asyncio task
+        has died (e.g. TG dropped), re-spawn it so the status display and the
+        actual delivery stay consistent.  No-op while TG is down (handled by
+        the connection watchdog above).
+        """
+        from app.core.database import async_session
+        from app.api.telegram import reload_listener_impl
+
+        async with async_session() as db:
+            pref = await _get_setting(db, "listener_enabled", "false")
+        if pref != "true":
+            return
+        task = tg_manager._listener_task
+        if task is not None and not task.done():
+            return  # 仍在运行
+
+        logger.info("Realtime listener task dead but listener_enabled=true; auto-restarting")
+        async with async_session() as db:
+            await reload_listener_impl(db)
 
     async def _catchup(self) -> None:
         from app.core.database import async_session
