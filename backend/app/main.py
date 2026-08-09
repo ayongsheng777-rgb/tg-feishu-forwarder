@@ -14,7 +14,7 @@ from app.core.config import settings
 from app.core.config import sync_db_settings_to_config
 from app.core.database import init_db
 from app.core.security import ensure_jwt_secret, decode_token, get_jwt_secret
-from app.api import auth, channels, rules, logs, settings as settings_api, telegram, system, aliases
+from app.api import auth, channels, rules, logs, settings as settings_api, stats, telegram, system, aliases
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -180,6 +180,7 @@ app.include_router(system.router)
 app.include_router(channels.router)
 app.include_router(rules.router)
 app.include_router(logs.router)
+app.include_router(stats.router)
 app.include_router(settings_api.router)
 app.include_router(telegram.router)
 app.include_router(aliases.router)

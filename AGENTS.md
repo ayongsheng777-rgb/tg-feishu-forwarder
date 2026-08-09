@@ -2,7 +2,7 @@
 
 > 写给接管本项目的 AI 智能体。这不是 README（README 给人快速上手），
 > 这是实战交接：系统为什么这样设计、怎么安全地改、哪些坑已经踩过。
-> 全部内容来自真实排障与修复记录（截至 2026-08-07，main @ 7cbf734）。
+> 全部内容来自真实排障与修复记录（截至 2026-08-09，main @ HEAD）。
 
 ---
 
@@ -229,6 +229,23 @@ README「飞书群命令」表、前端若有对应说明。
 - 默认 `listener_enabled` 不存在即视为 ON；用户在前端大开关关掉会持久化 `false`，
   重启后 `_auto_start_listener` 尊重该偏好跳过。TG 未授权（没登录）也会跳过并记日志。
 
+### 6.5 新增频道不热加载监听（已修复 2026-08-08）
+
+- **症状**：运行中新增频道 → `tg采集` 手动能拉到消息，但实时监听不会触发转发。
+- **根因**：`channels.py` 的 create/update/delete 只改 DB，没有调
+  `reload_listener_impl` 重建 Telethon 事件处理器；新频道不在监听集里。
+- **修复**：create_channel / update_channel（channel_id 或 enabled 变化时）/
+  delete_channel 三个入口均追加 `reload_listener_impl(db)`，新频道即时进实时集。
+- **验证标尺**：新增频道后不必 `tg采集`，等待该频道下一轮消息到达 → 自动转发即通过。
+
+### 6.6 监听器重启累积重复事件处理器（已修复 2026-08-08）
+
+- **症状**：多次重启监听 → 同一消息被转发多次（重复数 = 重启次数）。
+- **根因**：`start_listener_impl` 每次调用 `client.add_event_handler` 不先清旧 handler，
+  Telethon 允许多个同名 handler 共存 → N 次重启 = N 份重复。
+- **修复**：`start_listener_impl` 头部先 `client.remove_event_handler(on_new_message)`
+  清旧 handler 再添加。
+
 ## 7. 核心设计约定（改代码勿破）
 
 1. **飞书发送必须校验 code**：任何新 `send_*` 方法都要调 `_check_resp()`，否则失败
@@ -253,15 +270,15 @@ README「飞书群命令」表、前端若有对应说明。
 - 前端主题在 `frontend/src/styles/theme.css`（2026 水果自然风：Bento + 液态玻璃 +
   状态感知色温），改 UI 风格集中在此，别散落到组件内联。
 
-## 9. 当前状态（2026-08-07）
+## 9. 当前状态（2026-08-09）
 
-- 4 服务 healthy；监听自动拉起全部启用频道（实测 14~20 个）。
+- 4 服务 healthy；监听自动拉起全部启用频道（当前 26 个频道，4 个飞书群组）。
+- 仪表盘：按群分组统计（今日/本周/本月/累计），可展开频道明细；新增别名自动建群占位。
+- 后端新模块 `api/stats.py`：`GET /api/stats/dashboard` 返回分组聚合统计。
 - 品牌化完成「青鸟」+ 图标（`frontend/public/qingniao.png`、`favicon.png`）。
-- 三项能力已落地并验证：群名识别绑定、监听自动开启+开关、状态报告（命令+定时）。
-- 已清 338 条历史 failed 日志（保留 682 条 success），水位线 bug 已修。
+- §6.5/§6.6 已修复：热加载 + 去重 handler。
 - 待办/观察：
-  ① 230002 入群校验已在 `tg绑定`/aliases create 提示，但后台批量导入频道时仍可能
-    漏检（靠转发失败暴露）——可考虑导入时批量 `get_chat_name` 预校验；
+  ① 230002 入群校验已覆盖别名绑定，批量导入频道时仍可能漏检（靠转发失败暴露）；
   ② 容器 build 阶段 `npm ci`/`pip install` 受代理影响，CI 环境需配代理；
   ③ 飞书命令目前仅纯文本（msg_type=text），媒体类命令未支持；
   ④ 状态报告仅纯文本，未用卡片（需要时可扩 `send_card`）。

@@ -81,6 +81,11 @@ export const ruleApi = {
   delete: (id) => api.delete(`/rules/${id}`),
 }
 
+// ---------------- Stats (Dashboard) ----------------
+export const statsApi = {
+  dashboard: () => api.get('/stats/dashboard'),
+}
+
 // ---------------- Logs ----------------
 export const logApi = {
   list: (params) => api.get('/logs', { params }),
