@@ -335,6 +335,11 @@ class FeishuCommandService:
             await self._handle_status(chat_id, parts[1:])
             return
 
+        # --- Stats summary (group-level forwarding counts) ---
+        if cmd in ("tg统计", "tgstats"):
+            await self._handle_stats(chat_id, parts[1:])
+            return
+
         # Unknown command — ignore silently
 
     async def _auto_discover_chat(self, chat_id: str):
@@ -962,6 +967,47 @@ class FeishuCommandService:
             logger.exception("tg subscribe failed")
             await feishu_client.send_text(chat_id, f"❌ 订阅失败: {e}")
 
+    async def _handle_stats(self, chat_id: str, args: list[str]):
+        """Send a quick forwarding-stats summary (today's counts per group)."""
+        from app.core.database import async_session
+        from app.api.stats import dashboard_stats, _period_starts, _count_by_status
+        from app.models import Channel
+
+        period = "today"
+        if args and args[0] in ("本周", "week", "this_week"):
+            period = "this_week"
+        elif args and args[0] in ("本月", "month", "this_month"):
+            period = "this_month"
+        elif args and args[0] in ("累计", "all", "全部", "all_time"):
+            period = "all_time"
+
+        period_labels = {"today": "今日", "this_week": "本周", "this_month": "本月", "all_time": "累计"}
+
+        try:
+            async with async_session() as db:
+                data = await dashboard_stats(db)
+                groups = data.get("groups", [])
+
+            lines = [f"📊 青鸟转发统计 · {period_labels[period]}"]
+            total_all = 0
+            for g in groups:
+                stats = data["overall"] if period == "all_time" else g.get(period, {})
+                if not stats:
+                    stats = g.get("all_time", {})
+                t = stats.get("total", 0)
+                s = stats.get("success", 0)
+                f_cnt = stats.get("failed", 0)
+                total_all += t
+                ch_str = f"{g['channel_count']}频道" if g['channel_count'] > 0 else "待绑定"
+                fail_str = f" 失败{f_cnt}" if f_cnt > 0 else ""
+                lines.append(f"  {g['group_name']} ({ch_str}): {t}条 成功{s}{fail_str}")
+
+            lines.append(f"\n合计: {total_all} 条转发 · 共 {len(groups)} 个群")
+            await feishu_client.send_text(chat_id, "\n".join(lines))
+        except Exception as e:
+            logger.exception("_handle_stats failed: %s", e)
+            await feishu_client.send_text(chat_id, f"⚠️ 获取统计数据失败: {e}")
+
     async def _send_help(self, chat_id: str):
         """Send the help message."""
         help_text = (
@@ -994,6 +1040,7 @@ class FeishuCommandService:
             "【其他】\n"
             "· tg绑定 <名称> <群ID> — 绑定群名到飞书群\n"
             "· tg群列表 — 查看所有群名称绑定\n"
+            "· tg统计 [今日/本周/本月/累计] — 群消息转发统计概览（默认今日）\n"
             "· tg状态 [群名称] — 发送运行状态报告（默认发到当前群）\n"
             "· tg帮助 — 显示此帮助信息\n\n"
             "⚠️ Telegram 连接断开会主动推送到飞书，届时可按上方「登录」流程重登。"
