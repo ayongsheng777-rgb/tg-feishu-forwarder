@@ -28,80 +28,70 @@ class Forwarder:
     """Main forwarding orchestration."""
 
     async def handle_new_message(self, db: AsyncSession, event):
-        """Process a new TG message event."""
+        """Process a new TG message event — supports multi-target (one TG channel → many Feishu groups)."""
         chat_id = str(event.chat_id)
         msg = event.message
 
-        # Find the channel config for this chat
+        # Find ALL channel configs for this TG chat (may be multiple feishu targets)
         result = await db.execute(
             select(Channel).where(Channel.channel_id == chat_id, Channel.enabled == True)
         )
-        channel = result.scalar_one_or_none()
-        if not channel:
+        targets = result.scalars().all()
+        if not targets:
             return  # Channel not configured or disabled
 
-        # Dedup: skip already-processed messages
-        if msg.id <= channel.last_forwarded_id:
-            return
-
-        # Determine media type
+        # Determine media type ONCE (same for all targets)
         media_type = await rule_engine.get_media_type(event)
         sender_name = await self._get_sender_name(event)
+        text = self._clean_text(msg.message or msg.text or "")
 
-        # Extract text (caption for media messages)
-        text = msg.message or msg.text or ""
+        # Forward to each target independently
+        for channel in targets:
+            # Dedup per-target: skip already-processed messages
+            if msg.id <= channel.last_forwarded_id:
+                continue
+            if not channel.feishu_chat_id:
+                await self._log(db, channel.id, msg.id, sender_name, text, "", "failed", "", media_type, "No Feishu chat_id configured")
+                await self._update_last_id(db, channel.id, msg.id)
+                continue
 
-        # Clean text
-        text = self._clean_text(text)
-
-        # Evaluate rules
-        should_forward, reason = await rule_engine.evaluate(
-            db, channel.id, text, media_type
-        )
-
-        if not should_forward:
-            await self._log(db, channel.id, msg.id, sender_name, text, "", "skipped", "", media_type, f"Filtered: {reason}")
-            await self._update_last_id(db, channel.id, msg.id)
-            return
-
-        # Get Feishu target
-        feishu_chat = channel.feishu_chat_id
-        if not feishu_chat:
-            await self._log(db, channel.id, msg.id, sender_name, text, "", "failed", "", media_type, "No Feishu chat_id configured")
-            await self._update_last_id(db, channel.id, msg.id)
-            return
-
-        # Forward based on media type
-        try:
-            if media_type == "text":
-                feishu_msg_id = await self._forward_text(feishu_chat, channel, sender_name, text)
-            elif media_type == "photo":
-                feishu_msg_id = await self._forward_photo(feishu_chat, channel, sender_name, text, event, msg)
-            elif media_type == "video":
-                feishu_msg_id = await self._forward_video(feishu_chat, channel, sender_name, text, event, msg)
-            elif media_type in ("document", "sticker", "voice"):
-                feishu_msg_id = await self._forward_document(feishu_chat, channel, sender_name, text, event, msg)
-            else:
-                feishu_msg_id = await self._forward_text(feishu_chat, channel, sender_name, text or "[Unsupported message type]")
-
-            await self._log(db, channel.id, msg.id, sender_name, text, feishu_msg_id, "success", "", media_type, "")
-            await self._update_last_id(db, channel.id, msg.id)
-
-        except FeishuNotInChatError as e:
-            # 永久错误：机器人不在目标群，需手动拉入。记 skipped 并推进游标，
-            # 避免补抓每 2 分钟无限重试刷屏。
-            logger.warning("Forward skipped (bot not in chat %s): %s", feishu_chat, e)
-            await self._log(
-                db, channel.id, msg.id, sender_name, text, "",
-                "skipped", "", media_type,
-                f"机器人不在目标群({feishu_chat})，请将飞书机器人加入该群后重试",
+            # Evaluate rules
+            should_forward, reason = await rule_engine.evaluate(
+                db, channel.id, text, media_type
             )
-            await self._update_last_id(db, channel.id, msg.id)
-        except Exception as e:
-            logger.exception("Forward failed for msg %s in channel %s", msg.id, chat_id)
-            await self._log(db, channel.id, msg.id, sender_name, text, "", "failed", "", media_type, str(e))
-            # NOTE: do NOT advance last_forwarded_id on failure — a later
-            # manual fetch (采集) will retry this message automatically.
+            if not should_forward:
+                await self._log(db, channel.id, msg.id, sender_name, text, "", "skipped", "", media_type, f"Filtered: {reason}")
+                await self._update_last_id(db, channel.id, msg.id)
+                continue
+
+            feishu_chat = channel.feishu_chat_id
+            try:
+                if media_type == "text":
+                    feishu_msg_id = await self._forward_text(feishu_chat, channel, sender_name, text)
+                elif media_type == "photo":
+                    feishu_msg_id = await self._forward_photo(feishu_chat, channel, sender_name, text, event, msg)
+                elif media_type == "video":
+                    feishu_msg_id = await self._forward_video(feishu_chat, channel, sender_name, text, event, msg)
+                elif media_type in ("document", "sticker", "voice"):
+                    feishu_msg_id = await self._forward_document(feishu_chat, channel, sender_name, text, event, msg)
+                else:
+                    feishu_msg_id = await self._forward_text(feishu_chat, channel, sender_name, text or "[Unsupported message type]")
+
+                await self._log(db, channel.id, msg.id, sender_name, text, feishu_msg_id, "success", "", media_type, "")
+                await self._update_last_id(db, channel.id, msg.id)
+
+            except FeishuNotInChatError as e:
+                logger.warning("Forward skipped (bot not in chat %s): %s", feishu_chat, e)
+                await self._log(
+                    db, channel.id, msg.id, sender_name, text, "",
+                    "skipped", "", media_type,
+                    f"机器人不在目标群({feishu_chat})，请将飞书机器人加入该群后重试",
+                )
+                await self._update_last_id(db, channel.id, msg.id)
+            except Exception as e:
+                logger.exception("Forward failed for msg %s in channel %s→%s", msg.id, chat_id, feishu_chat[-20:])
+                await self._log(db, channel.id, msg.id, sender_name, text, "", "failed", "", media_type, str(e))
+                # NOTE: do NOT advance last_forwarded_id on failure
 
     # ------------------------------------------------------------------
     #  Individual forward methods

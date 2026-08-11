@@ -191,19 +191,23 @@ class TelegramManager:
         }
 
     async def list_dialogs(self) -> list[dict]:
-        """List all dialogs (channels, chats, users) the account has joined."""
+        """List all joined TG channels and supergroups (filtered: no private chats/bots)."""
         client = self._get_client()
         if not client.is_connected():
             await client.connect()
+        if not await client.is_user_authorized():
+            raise RuntimeError("TG 未登录，请先在「Telegram 登录」页面完成授权")
         result = []
         async for dialog in client.iter_dialogs():
             entity = dialog.entity
-            is_channel = isinstance(entity, (Channel, Chat))
+            # Only keep channels and supergroups (exclude private chats, users, bots)
+            if not isinstance(entity, (Channel, Chat)):
+                continue
             result.append({
                 "id": str(dialog.id),
-                "title": dialog.title or entity.username or str(dialog.id),
+                "title": dialog.title or getattr(entity, "username", None) or str(dialog.id),
                 "username": getattr(entity, "username", None),
-                "is_channel": is_channel,
+                "is_channel": True,
                 "type": type(entity).__name__,
             })
         return result

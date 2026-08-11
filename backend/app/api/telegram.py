@@ -154,7 +154,7 @@ async def start_listener_impl(db: AsyncSession) -> list[str]:
         select(Channel).where(Channel.enabled == True)
     )
     channels = result.scalars().all()
-    channel_ids = [ch.channel_id for ch in channels]
+    channel_ids = list(dict.fromkeys(ch.channel_id for ch in channels))  # dedup, preserve order
 
     if not channel_ids:
         raise HTTPException(400, "No enabled channels to monitor")
@@ -174,7 +174,7 @@ async def reload_listener_impl(db: AsyncSession) -> list[str]:
         select(Channel).where(Channel.enabled == True)
     )
     channels = result.scalars().all()
-    channel_ids = [ch.channel_id for ch in channels]
+    channel_ids = list(dict.fromkeys(ch.channel_id for ch in channels))  # dedup, preserve order
 
     if not channel_ids:
         await tg_manager.stop_listener()

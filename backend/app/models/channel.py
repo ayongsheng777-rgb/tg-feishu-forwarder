@@ -8,7 +8,7 @@ class Channel(Base):
     __tablename__ = "channels"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    channel_id = Column(String(64), unique=True, nullable=False, index=True, comment="TG channel/chat ID")
+    channel_id = Column(String(64), nullable=False, index=True, comment="TG channel/chat ID (may duplicate for multi-target forwarding)")
     channel_title = Column(String(256), nullable=True, comment="Display name")
     channel_username = Column(String(256), nullable=True, comment="@username if available")
     feishu_chat_id = Column(String(64), nullable=False, default="", comment="Target Feishu chat ID")

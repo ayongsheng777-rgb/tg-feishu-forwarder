@@ -2,7 +2,7 @@
 
 > 写给接管本项目的 AI 智能体。这不是 README（README 给人快速上手），
 > 这是实战交接：系统为什么这样设计、怎么安全地改、哪些坑已经踩过。
-> 全部内容来自真实排障与修复记录（截至 2026-08-09，main @ HEAD）。
+> 全部内容来自真实排障与修复记录（截至 2026-08-11，main @ HEAD）。
 
 ---
 
@@ -177,7 +177,7 @@ sqlite3 "D:/WorkBuddy/tg-feishu-forwarder/data/tg_feishu.db" "SQL..."
 | `telegram.py` | `/api-credentials`、`/login/*`、`/listener/start|stop|status`（start/stop 持久化偏好）|
 | `system.py` | `/health`、`/info`、`/report`(预览)、`/report/send`、`/restart`(进程退出靠 Docker 重启) |
 | `channels.py` / `rules.py` / `logs.py` / `settings_api.py` | 频道、规则、日志、系统设置 CRUD |
-| `aliases.py` | `/api/aliases` 群绑定 CRUD（create 时校验机器人在群内）|
+| `aliases.py` | `/api/aliases` 群绑定 CRUD（create 时校验机器人在群内）；`POST /{id}/clone` 一键克隆频道到目标群 |
 | `auth.py` | 登录/JWT（首次 setup）|
 
 ## 5. 飞书群命令（用户侧，改文案必须同步 README + help）
@@ -246,6 +246,34 @@ README「飞书群命令」表、前端若有对应说明。
 - **修复**：`start_listener_impl` 头部先 `client.remove_event_handler(on_new_message)`
   清旧 handler 再添加。
 
+### 6.7 channels.py 缺少 logger 导入导致创建频道崩溃（已修复 2026-08-11）
+
+- **症状**：创建/更新/删除频道时返回 500，前端显示"保存失败"。
+- **根因**：`channels.py` 中 3 处 `logger.warning(...)` 但文件顶部缺少
+  `import logging` + `logger = logging.getLogger(__name__)`，当 `reload_listener_impl`
+  失败时，except 块的 `logger.warning` 抛出 NameError 穿透请求处理器。
+- **修复**：添加 logger import。
+
+### 6.8 list_dialogs 不过滤非频道实体 + 未检查 TG 鉴权（已修复 2026-08-11）
+
+- **症状**："从TG导入"弹窗可能显示私聊/bot/用户等非频道实体，或 TG 未登录时错误信息不友好。
+- **修复**：`list_dialogs()` 加 `is_user_authorized()` 前置检查 → `RuntimeError("TG 未登录")`；
+  过滤只保留 `isinstance(Channel, Chat)`；dialogs 端点区分 RuntimeError(401) vs 其他(500)。
+
+### 6.9 chat_aliases.auto_discovered 为 NULL 导致群绑定页 500（已修复 2026-08-11）
+
+- **症状**：群名称绑定页加载失败，`ResponseValidationError: auto_discovered should be bool, got None`。
+- **根因**：手动 INSERT 时漏了 `auto_discovered` 字段，SQLite 存为 NULL，Pydantic 校验 bool 类型失败。
+- **修复**：`UPDATE chat_aliases SET auto_discovered=0 WHERE auto_discovered IS NULL`。
+- **教训**：手动改 DB 必须补全所有非 null 字段。
+
+### 6.10 多目标转发架构（2026-08-11 新增能力）
+
+- 原 `channels.channel_id` 有 UNIQUE 约束 → 同一 TG 频道只能绑一个飞书群。
+- 移除约束后：一个 TG 频道可多行，每行不同 `feishu_chat_id`，独立水位线。
+- `handle_new_message`：`scalars().all()` 遍历所有目标群，逐群规则评估 + 转发。
+- Listener 去重：`reload_listener_impl` 用 `dict.fromkeys` 保证每个 TG 频道只注册一次事件处理器。
+
 ## 7. 核心设计约定（改代码勿破）
 
 1. **飞书发送必须校验 code**：任何新 `send_*` 方法都要调 `_check_resp()`，否则失败
@@ -270,13 +298,18 @@ README「飞书群命令」表、前端若有对应说明。
 - 前端主题在 `frontend/src/styles/theme.css`（2026 水果自然风：Bento + 液态玻璃 +
   状态感知色温），改 UI 风格集中在此，别散落到组件内联。
 
-## 9. 当前状态（2026-08-09）
+## 9. 当前状态（2026-08-11）
 
-- 4 服务 healthy；监听自动拉起全部启用频道（当前 26 个频道，4 个飞书群组）。
+- 4 服务 healthy；监听自动拉起全部启用频道（25 个唯一 TG 频道，33 条 DB 记录，5 个飞书群组）。
+- **多目标转发**（2026-08-11）：`channels.channel_id` 唯一约束已移除，同一 TG 频道可绑定多个飞书群。
+  `handle_new_message` 遍历所有匹配行逐群转发、独立水位线；listener 启动时 channel_ids 自动去重。
+- **一键克隆**（2026-08-11）：群绑定页新增「克隆」按钮，`POST /api/aliases/{id}/clone` 一键复制
+  源群全部频道到目标群（跳过已存在的 channel_id+feishu_chat_id 组合），自动 reload listener。
 - 仪表盘：按群分组统计（今日/本周/本月/累计），可展开频道明细；新增别名自动建群占位。
 - 后端新模块 `api/stats.py`：`GET /api/stats/dashboard` 返回分组聚合统计。
 - 品牌化完成「青鸟」+ 图标（`frontend/public/qingniao.png`、`favicon.png`）。
 - §6.5/§6.6 已修复：热加载 + 去重 handler。
+- 飞书群：新闻/影视/科技/财经/**神机**（5 群，神机群 7 个财经频道）
 - 待办/观察：
   ① 230002 入群校验已覆盖别名绑定，批量导入频道时仍可能漏检（靠转发失败暴露）；
   ② 容器 build 阶段 `npm ci`/`pip install` 受代理影响，CI 环境需配代理；

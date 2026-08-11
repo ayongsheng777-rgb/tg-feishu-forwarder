@@ -61,6 +61,7 @@ export const aliasApi = {
   update: (id, data) => api.put(`/aliases/${id}`, data),
   delete: (id) => api.delete(`/aliases/${id}`),
   channels: (id) => api.get(`/aliases/${id}/channels`),
+  clone: (id, targetId) => api.post(`/aliases/${id}/clone`, { target_alias_id: targetId }),
 }
 
 // ---------------- Channels ----------------

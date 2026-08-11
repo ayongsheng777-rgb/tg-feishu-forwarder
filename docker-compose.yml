@@ -57,6 +57,7 @@ services:
   # ---- Redis 消息队列 ----
   redis:
     image: redis:alpine
+    container_name: tg-feishu-redis
     restart: always
     volumes:
       - redis_data:/data

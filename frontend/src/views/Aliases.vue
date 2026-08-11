@@ -38,9 +38,10 @@
               />
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="200" align="center">
+          <el-table-column label="操作" width="260" align="center">
             <template #default="{ row }">
               <el-button size="small" text type="primary" @click="viewChannels(row)">频道</el-button>
+              <el-button size="small" text type="success" @click="openClone(row)">克隆</el-button>
               <el-button size="small" text type="primary" @click="openDialog(row)">编辑</el-button>
               <el-button size="small" text type="danger" @click="removeAlias(row)">删除</el-button>
             </template>
@@ -124,6 +125,35 @@
         前往「频道管理」，把频道的目标飞书群ID设为 {{ currentAlias?.feishu_chat_id }} 即可关联。
       </el-alert>
     </el-dialog>
+
+    <!-- 一键克隆对话框 -->
+    <el-dialog v-model="cloneVisible" title="一键克隆频道" width="480px" :close-on-click-modal="false">
+      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 16px">
+        将「{{ cloneSource?.name }}」的所有 TG 频道复制到目标群。
+      </el-alert>
+      <el-form label-width="90px">
+        <el-form-item label="源群">
+          <el-tag>{{ cloneSource?.name }}</el-tag>
+          <code class="chat-id" style="margin-left: 8px">{{ cloneSource?.feishu_chat_id }}</code>
+        </el-form-item>
+        <el-form-item label="目标群" required>
+          <el-select v-model="cloneTargetId" placeholder="选择目标群" style="width: 100%">
+            <el-option
+              v-for="a in aliases.filter(x => x.id !== cloneSource?.id)"
+              :key="a.id"
+              :label="`${a.name} (${a.feishu_chat_id.slice(-12)})`"
+              :value="a.id"
+            />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="cloneVisible = false">取消</el-button>
+        <el-button type="primary" :loading="cloning" @click="doClone" :disabled="!cloneTargetId">
+          开始克隆
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -144,6 +174,12 @@ const channelsVisible = ref(false)
 const channelsLoading = ref(false)
 const aliasChannels = ref([])
 const currentAlias = ref(null)
+
+// --- 一键克隆 ---
+const cloneVisible = ref(false)
+const cloneSource = ref(null)
+const cloneTargetId = ref(null)
+const cloning = ref(false)
 
 async function load() {
   loading.value = true
@@ -231,6 +267,30 @@ async function viewChannels(row) {
     ElMessage.error('查询失败')
   } finally {
     channelsLoading.value = false
+  }
+}
+
+function openClone(row) {
+  cloneSource.value = row
+  cloneTargetId.value = null
+  cloneVisible.value = true
+}
+
+async function doClone() {
+  if (!cloneTargetId.value || !cloneSource.value) return
+  cloning.value = true
+  try {
+    const res = await aliasApi.clone(cloneSource.value.id, cloneTargetId.value)
+    const d = res.data
+    ElMessage.success(
+      `克隆完成：${d.source} → ${d.target}，新增 ${d.cloned} 个频道` +
+      (d.skipped > 0 ? `，跳过 ${d.skipped} 个（已存在）` : '')
+    )
+    cloneVisible.value = false
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '克隆失败')
+  } finally {
+    cloning.value = false
   }
 }
 

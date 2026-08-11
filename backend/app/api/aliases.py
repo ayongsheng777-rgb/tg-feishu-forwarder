@@ -1,5 +1,8 @@
 """Chat alias API — manage Feishu group name <-> chat_id bindings."""
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,7 +11,13 @@ from app.models import Channel, ChatAlias
 from app.schemas.chat_alias import ChatAliasCreate, ChatAliasOut, ChatAliasUpdate
 from app.services import alias_resolver
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/aliases", tags=["aliases"])
+
+
+class CloneRequest(BaseModel):
+    target_alias_id: int
 
 
 @router.get("", response_model=list[ChatAliasOut])
@@ -94,3 +103,74 @@ async def alias_channels(alias_id: int, db: AsyncSession = Depends(get_db)):
         }
         for ch in channels
     ]
+
+
+@router.post("/{alias_id}/clone")
+async def clone_alias_channels(
+    alias_id: int,
+    req: CloneRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """一键克隆：把源群的所有 TG 频道复制到目标群。"""
+    # Validate source
+    result = await db.execute(select(ChatAlias).where(ChatAlias.id == alias_id))
+    src = result.scalar_one_or_none()
+    if not src:
+        raise HTTPException(404, "源群绑定不存在")
+
+    # Validate target
+    result = await db.execute(select(ChatAlias).where(ChatAlias.id == req.target_alias_id))
+    dst = result.scalar_one_or_none()
+    if not dst:
+        raise HTTPException(404, "目标群绑定不存在")
+    if src.id == dst.id:
+        raise HTTPException(400, "源群和目标群不能相同")
+
+    # Find all channels pointing to source feishu_chat_id
+    result = await db.execute(
+        select(Channel).where(Channel.feishu_chat_id == src.feishu_chat_id)
+    )
+    src_channels = result.scalars().all()
+
+    cloned = 0
+    skipped = 0
+    for ch in src_channels:
+        # Check if the same channel_id + target already exists
+        result = await db.execute(
+            select(Channel).where(
+                Channel.channel_id == ch.channel_id,
+                Channel.feishu_chat_id == dst.feishu_chat_id,
+            )
+        )
+        if result.scalar_one_or_none():
+            skipped += 1
+            continue
+        new_ch = Channel(
+            channel_id=ch.channel_id,
+            channel_title=ch.channel_title,
+            channel_username=ch.channel_username,
+            feishu_chat_id=dst.feishu_chat_id,
+            enabled=ch.enabled,
+            last_forwarded_id=0,  # fresh watermark
+        )
+        db.add(new_ch)
+        cloned += 1
+
+    await db.commit()
+
+    # Reload listener
+    if cloned > 0:
+        try:
+            from app.api.telegram import reload_listener_impl
+            await reload_listener_impl(db)
+        except Exception:
+            logger.warning("Failed to reload listener after clone", exc_info=True)
+
+    return {
+        "ok": True,
+        "source": src.name,
+        "target": dst.name,
+        "cloned": cloned,
+        "skipped": skipped,
+        "total": len(src_channels),
+    }

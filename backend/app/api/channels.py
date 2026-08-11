@@ -1,4 +1,6 @@
 """Channel management API — CRUD + TG dialog discovery."""
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +10,8 @@ from app.models import Channel
 from app.schemas.channel import ChannelCreate, ChannelUpdate, ChannelOut
 from app.services.telegram_client import tg_manager
 from app.services.forwarder import forwarder
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
 
@@ -74,12 +78,15 @@ async def delete_channel(channel_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.get("/dialogs")
 async def list_tg_dialogs():
-    """List all joined TG dialogs (channels, chats, groups)."""
+    """List all joined TG channels and supergroups (excludes private chats, bots)."""
     try:
         dialogs = await tg_manager.list_dialogs()
         return {"dialogs": dialogs}
+    except RuntimeError as e:
+        raise HTTPException(401, str(e))
     except Exception as e:
-        raise HTTPException(500, f"Failed to list dialogs: {e}")
+        logger.exception("Failed to list TG dialogs")
+        raise HTTPException(500, f"获取 TG 频道列表失败：{e}")
 
 
 @router.post("/{channel_id}/fetch")
