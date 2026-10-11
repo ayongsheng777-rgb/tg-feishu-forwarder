@@ -47,7 +47,9 @@ services:
 
   # ---- 前端管理后台 (Vue 3 + Nginx) ----
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.local
     restart: always
     ports:
       - "8090:80"
@@ -56,7 +58,7 @@ services:
 
   # ---- Redis 消息队列 ----
   redis:
-    image: redis:alpine
+    image: redis:7-alpine
     container_name: tg-feishu-redis
     restart: always
     volumes:

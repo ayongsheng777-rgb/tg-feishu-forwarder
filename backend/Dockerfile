@@ -1,5 +1,14 @@
 FROM python:3.12-slim
 
+# 非交互安装（避免 tzdata 弹出地区选择卡住构建）
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Asia/Shanghai
+
+# Proxy support for build (apt/pip behind proxy)
+ARG http_proxy=
+ARG https_proxy=
+ARG no_proxy=
+
 # System dependencies for Pillow, Telethon, etc.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
