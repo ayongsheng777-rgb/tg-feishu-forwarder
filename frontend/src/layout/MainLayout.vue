@@ -1,6 +1,6 @@
 <template>
   <el-container class="app-layout">
-    <el-aside width="232px" class="sidebar">
+    <el-aside width="232px" class="sidebar" :class="{ 'drawer-open': drawerOpen }">
       <div class="logo">
         <img src="/qingniao.png" alt="青鸟" class="logo-img" />
         <div class="logo-text">
@@ -58,12 +58,20 @@
     <el-container>
       <el-header class="header" :class="ambientClass">
         <div class="header-left">
+          <button
+            class="nav-toggle"
+            type="button"
+            aria-label="打开菜单"
+            @click="drawerOpen = true"
+          >
+            <el-icon><Menu /></el-icon>
+          </button>
           <span class="page-title">{{ currentPageTitle }}</span>
         </div>
         <div class="header-right">
           <div class="status-pill" :class="listenerRunning ? 'pill-ok' : 'pill-off'">
             <span class="status-dot" :class="listenerRunning ? 'on' : 'off'"></span>
-            {{ listenerRunning ? '监听运行中' : '监听已停止' }}
+            <span class="pill-text">{{ listenerRunning ? '监听运行中' : '监听已停止' }}</span>
           </div>
           <el-button
             type="warning"
@@ -72,11 +80,11 @@
             :loading="restarting"
             @click="handleRestart"
           >
-            重启服务
+            <span class="btn-label">重启服务</span>
           </el-button>
           <el-dropdown trigger="click" @command="handleCommand">
             <el-button size="small" :icon="UserFilled">
-              {{ currentUser }} <el-icon><ArrowDown /></el-icon>
+              <span class="btn-label">{{ currentUser }}</span> <el-icon><ArrowDown /></el-icon>
             </el-button>
             <template #dropdown>
               <el-dropdown-menu>
@@ -103,16 +111,19 @@
         </router-view>
       </el-main>
     </el-container>
+
+    <!-- 移动端抽屉遮罩：点击关闭 -->
+    <div v-if="drawerOpen" class="sidebar-backdrop" @click="drawerOpen = false"></div>
   </el-container>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { telegramApi, systemApi, authApi } from '../api'
 import { ElMessageBox, ElMessage, ElNotification } from 'element-plus'
 import {
-  RefreshRight, UserFilled, ArrowDown, Setting, Key, SwitchButton,
+  RefreshRight, UserFilled, ArrowDown, Setting, Key, SwitchButton, Menu,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -122,6 +133,12 @@ const tgConnected = ref(false)
 const listenerRunning = ref(false)
 const restarting = ref(false)
 const currentUser = ref('')
+
+// 移动端抽屉式侧边栏（≤768px 生效，见样式里的媒体查询）
+const drawerOpen = ref(false)
+
+// 切换页面后自动收起，否则抽屉会盖住刚打开的页面
+watch(() => route.path, () => { drawerOpen.value = false })
 
 const pageTitles = {
   '/': '仪表盘',
@@ -387,15 +404,26 @@ onUnmounted(() => {
   -webkit-backdrop-filter: blur(18px) saturate(1.2);
   border-bottom: 1px solid rgba(255, 255, 255, 0.6);
 }
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;              /* 让标题可省略，而不是把顶栏顶宽 */
+}
 .page-title {
   font-size: 18px;
   font-weight: 700;
   color: #33414e;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .header-right {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-shrink: 1;
+  min-width: 0;
 }
 .status-pill {
   display: flex;
@@ -422,5 +450,73 @@ onUnmounted(() => {
   padding: 22px;
   overflow-y: auto;
   background: transparent;
+}
+
+/* ============================================================
+   移动端适配
+   ------------------------------------------------------------
+   此前整个应用外壳一个 @media 都没有：侧边栏固定 232px 不折叠、
+   顶栏 .header-right 不换行也不收缩，窗口 <480px 时顶栏撑破页面
+   （documentElement.scrollWidth 530 vs 视口 480）。
+   ≤768px 起侧边栏改为抽屉（汉堡按钮 + 遮罩），主区因此拿到整屏宽度；
+   ≤560px 进一步收起顶栏按钮文字，彻底消除横向滚动。
+   ============================================================ */
+.nav-toggle {
+  display: none;                     /* 桌面隐藏，仅窄屏出现 */
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid rgba(51, 65, 78, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.6);
+  color: #33414e;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.nav-toggle:hover { background: rgba(255, 255, 255, 0.95); }
+
+.sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1999;
+  background: rgba(18, 26, 34, 0.45);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+}
+
+@media (max-width: 768px) {
+  .nav-toggle { display: inline-flex; }
+
+  /* 抽屉：position:fixed 脱离文档流，主区自然占满整屏 */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(232px, 78vw);
+    z-index: 2000;
+    transform: translateX(-100%);
+    transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .sidebar.drawer-open {
+    transform: translateX(0);
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.45);
+  }
+
+  .header { padding: 0 12px; }
+  .main-content { padding: 14px; }
+  .page-title { font-size: 16px; }
+}
+
+@media (max-width: 560px) {
+  /* 只留图标：这是消除横向溢出的关键一步 */
+  .pill-text { display: none; }
+  .status-pill { padding: 6px 10px; }
+  .btn-label { display: none; }
+  .header-right { gap: 8px; }
+  .main-content { padding: 10px; }
 }
 </style>
