@@ -36,3 +36,10 @@ frontend/npm-debug.log*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# --- AI 工作区（本地记忆/截图，不进仓库）---
+.workbuddy-ai/
+
+# --- NAS 专属适配（只存在于 192.168.57.228，勿带回 Windows）---
+docker-compose.override.yml
+backend/Dockerfile.nas
