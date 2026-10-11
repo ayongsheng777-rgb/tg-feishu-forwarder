@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, func
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -15,6 +15,13 @@ _TZ = timezone(timedelta(hours=8))
 
 # Number of channels with no feishu_chat_id — ignore them
 _UNBOUND = ""
+
+# Statuses that get their own bucket (anything else only counts toward ``total``,
+# matching the previous behaviour).
+_STATUSES = ("success", "failed", "skipped")
+
+# Periods reported per channel / group / globally.
+_PERIODS = ("today", "this_week", "this_month", "all_time")
 
 
 def _period_starts() -> dict[str, datetime]:
@@ -31,6 +38,25 @@ def _period_starts() -> dict[str, datetime]:
     }
 
 
+def _empty_stats() -> dict:
+    return {"total": 0, "success": 0, "failed": 0, "skipped": 0}
+
+
+def _add_stats(target: dict, source: dict) -> dict:
+    """Accumulate ``source`` counts into ``target`` (in place)."""
+    for key in ("total", "success", "failed", "skipped"):
+        target[key] += source.get(key, 0)
+    return target
+
+
+def _sum_stats(chunks) -> dict:
+    """Sum an iterable of ``{total,success,failed,skipped}`` dicts."""
+    out = _empty_stats()
+    for chunk in chunks:
+        _add_stats(out, chunk)
+    return out
+
+
 async def _count_by_status(
     db: AsyncSession,
     since: datetime | None = None,
@@ -38,6 +64,10 @@ async def _count_by_status(
     channel_db_ids: list[int] | None = None,
 ) -> dict:
     """Count forward_logs grouped by status, with optional time / channel filter.
+
+    Kept for ad-hoc callers (e.g. the ``tg统计`` Feishu command). The dashboard
+    no longer uses it — it does a single grouped pass instead, see
+    :func:`_aggregate_by_channel`.
 
     *channel_db_id*  – single channel (used for per-channel drill-down)
     *channel_db_ids* – multiple channels (used for group-level aggregation)
@@ -50,7 +80,7 @@ async def _count_by_status(
     if channel_db_ids is not None:
         if not channel_db_ids:
             # No channels in this group yet — return zero stats immediately
-            return {"total": 0, "success": 0, "failed": 0, "skipped": 0}
+            return _empty_stats()
         conditions.append(ForwardLog.channel_id.in_(channel_db_ids))
 
     def _scalar(stmt):
@@ -72,12 +102,50 @@ async def _count_by_status(
     }
 
 
-async def _resolve_group_name(db: AsyncSession, feishu_chat_id: str) -> str:
-    """Resolve a display name for a feishu_chat_id via ChatAlias, fallback to the raw ID."""
-    alias = await db.scalar(
-        select(ChatAlias.name).where(ChatAlias.feishu_chat_id == feishu_chat_id)
+async def _aggregate_by_channel(db: AsyncSession, periods: dict[str, datetime]) -> dict:
+    """Single grouped pass over ``forward_logs``.
+
+    Returns ``{channel_id: {period: {total, success, failed, skipped}}}`` where
+    ``channel_id`` may be ``None`` for logs whose channel has been deleted.
+
+    Why: the old implementation issued four COUNTs per (group × period) and per
+    (channel × period) — with 6 groups / 33 channels that is ~2,560 queries, each
+    a full table scan, which made ``/api/stats/dashboard`` take ~30s. This is
+    one ``GROUP BY channel_id, status`` with conditional sums instead.
+    """
+    today, week, month = periods["today"], periods["this_week"], periods["this_month"]
+
+    rows = await db.execute(
+        select(
+            ForwardLog.channel_id,
+            ForwardLog.status,
+            func.count(ForwardLog.id),
+            func.sum(case((ForwardLog.created_at >= today, 1), else_=0)),
+            func.sum(case((ForwardLog.created_at >= week, 1), else_=0)),
+            func.sum(case((ForwardLog.created_at >= month, 1), else_=0)),
+        ).group_by(ForwardLog.channel_id, ForwardLog.status)
     )
-    return alias or feishu_chat_id
+
+    result: dict = {}
+    for channel_id, status, n_all, n_today, n_week, n_month in rows.all():
+        bucket = result.setdefault(
+            channel_id, {period: _empty_stats() for period in _PERIODS}
+        )
+        for period, count in (
+            ("all_time", n_all),
+            ("today", n_today),
+            ("this_week", n_week),
+            ("this_month", n_month),
+        ):
+            count = count or 0
+            bucket[period]["total"] += count
+            if status in _STATUSES:
+                bucket[period][status] += count
+    return result
+
+
+def _zero_bucket() -> dict:
+    return {period: _empty_stats() for period in _PERIODS}
 
 
 @router.get("/dashboard")
@@ -95,11 +163,14 @@ async def dashboard_stats(db: AsyncSession = Depends(get_db)):
     """
     periods = _period_starts()
 
-    # --- Global aggregates ---
-    overall = await _count_by_status(db)
-    by_period: dict[str, dict] = {}
-    for name, start in periods.items():
-        by_period[name] = await _count_by_status(db, since=start)
+    # One pass over forward_logs for every channel/status combination.
+    per_channel = await _aggregate_by_channel(db, periods)
+
+    # --- Global aggregates (all logs, including channels with no binding) ---
+    overall = _sum_stats(b["all_time"] for b in per_channel.values())
+    by_period = {
+        name: _sum_stats(b[name] for b in per_channel.values()) for name in periods
+    }
 
     # --- Load all channels + alias map ---
     result = await db.execute(select(Channel).order_by(Channel.id))
@@ -108,8 +179,6 @@ async def dashboard_stats(db: AsyncSession = Depends(get_db)):
     alias_result = await db.execute(select(ChatAlias))
     all_aliases = alias_result.scalars().all()
     alias_map: dict[str, str] = {a.feishu_chat_id: a.name for a in all_aliases}
-    # Also collect alias → alias_id for reference
-    alias_id_map: dict[str, int] = {a.feishu_chat_id: a.id for a in all_aliases}
 
     # --- Group channels by feishu_chat_id ---
     groups_map: dict[str, list[Channel]] = {}
@@ -130,33 +199,33 @@ async def dashboard_stats(db: AsyncSession = Depends(get_db)):
     # --- Build group-level aggregates ---
     groups: list[dict] = []
     for fid, ch_list in groups_map.items():
-        group_name = alias_map.get(fid, fid)
-        ch_ids = [ch.id for ch in ch_list]
-
         entry: dict = {
             "feishu_chat_id": fid,
-            "group_name": group_name,
+            "group_name": alias_map.get(fid, fid),
             "channel_count": len(ch_list),
         }
         # Group-level stats (aggregate all channels under this group)
-        for period_name, start in periods.items():
-            entry[period_name] = await _count_by_status(db, since=start, channel_db_ids=ch_ids)
-        entry["all_time"] = await _count_by_status(db, channel_db_ids=ch_ids)
+        for period_name in periods:
+            entry[period_name] = _sum_stats(
+                per_channel.get(ch.id, _zero_bucket())[period_name] for ch in ch_list
+            )
+        entry["all_time"] = _sum_stats(
+            per_channel.get(ch.id, _zero_bucket())["all_time"] for ch in ch_list
+        )
 
         # Per-channel drill-down
         entry["channels"] = []
         for ch_obj in ch_list:
+            stats = per_channel.get(ch_obj.id) or _zero_bucket()
             ch_entry: dict = {
                 "id": ch_obj.id,
                 "tg_channel_id": ch_obj.channel_id,
                 "channel_title": ch_obj.channel_title or ch_obj.channel_username or ch_obj.channel_id,
                 "enabled": ch_obj.enabled,
             }
-            for period_name, start in periods.items():
-                ch_entry[period_name] = await _count_by_status(
-                    db, since=start, channel_db_id=ch_obj.id
-                )
-            ch_entry["all_time"] = await _count_by_status(db, channel_db_id=ch_obj.id)
+            for period_name in periods:
+                ch_entry[period_name] = stats[period_name]
+            ch_entry["all_time"] = stats["all_time"]
             entry["channels"].append(ch_entry)
 
         # Sort channels within group: most all_time total first
