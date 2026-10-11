@@ -28,6 +28,24 @@ class FeishuNotInChatError(Exception):
     """
 
 
+class ImageNotSupportedError(Exception):
+    """本地无法把图片转成飞书可接受的格式。
+
+    典型场景：文件已损坏、下载不完整（0 字节）、根本不是图片，
+    或缺少对应解码器。这种情况重试没有意义，必须上抛让调用方决定
+    （转发器会降级为「文字 + 原文链接」）。
+    """
+
+
+def _head_hex(path: str, n: int = 12) -> str:
+    """读文件头若干字节的十六进制，用于判断真实格式（排障用）。"""
+    try:
+        with open(path, "rb") as f:
+            return f.read(n).hex()
+    except Exception:
+        return "?"
+
+
 
 class FeishuClient:
     """Feishu API wrapper with automatic token refresh."""
@@ -251,41 +269,42 @@ class FeishuClient:
     async def upload_image(self, file_path: str) -> str:
         """Upload an image file and return the image_key.
 
-        Feishu's ``image_type=message`` requires images ≤ 1500×1500 px
-        and ≤ 10 MB.  Oversized images are auto-resized/compressed via Pillow.
-        If Feishu rejects the format (e.g. code 234011 "Can't recognize image
-        format" — common with TG webp/sticker exports), the image is
-        force-converted to JPEG and retried once.
+        飞书 ``/im/v1/images``（``image_type=message``）只接受
+        jpg/jpeg/png/webp/gif/bmp，且 ≤ 10 MB、长边 ≤ 1500 px。
+        这里先把图片**归一化成合规文件**（必要时重编码为 JPEG）再上传；
+        若飞书仍以 234011/234006 拒绝，则强制转 JPEG 再试一次。
+
+        本地根本无法解码时抛 :class:`ImageNotSupportedError` —— 重试无意义。
         """
         await self._ensure_token()
         try:
             return await self._upload_image_once(file_path, force_jpeg=False)
-        except RuntimeError:
-            logger.info("Image upload rejected, retrying with forced JPEG: %s", file_path)
+        except ImageNotSupportedError:
+            raise
+        except RuntimeError as exc:
+            logger.warning("[img] 飞书拒绝原图，改用 JPEG 重试: %s — %s", file_path, exc)
             return await self._upload_image_once(file_path, force_jpeg=True)
 
     async def _upload_image_once(self, file_path: str, force_jpeg: bool) -> str:
         import os as _os
 
-        filename = _os.path.basename(file_path)
-        processed_path = self._prepare_image(file_path, force=force_jpeg)
+        original_name = _os.path.basename(file_path)
+        processed_path, upload_name, content_type = self._prepare_image(
+            file_path, original_name, force=force_jpeg
+        )
         try:
             with open(processed_path, "rb") as f:
                 file_bytes = f.read()
-            if force_jpeg or processed_path.endswith(".jpg"):
-                filename = _os.path.splitext(filename)[0] + ".jpg"
-                content_type = "image/jpeg"
-            else:
-                ext = _os.path.splitext(filename)[1].lower() or ".jpg"
-                ct_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                          ".png": "image/png", ".webp": "image/webp",
-                          ".gif": "image/gif", ".bmp": "image/bmp"}
-                content_type = ct_map.get(ext, "image/jpeg")
+            logger.info(
+                "[img] 上传 %s → %s (%s, %.2f MB, %s)",
+                original_name, upload_name, content_type, len(file_bytes) / 1048576,
+                "JPEG 重编码" if processed_path != file_path else "原图直传",
+            )
             resp = await self._http.post(
                 f"{FEISHU_BASE}/im/v1/images",
                 data={"image_type": "message"},
                 headers={"Authorization": f"Bearer {self._token}"},
-                files={"image": (filename, file_bytes, content_type)},
+                files={"image": (upload_name, file_bytes, content_type)},
             )
         finally:
             if processed_path != file_path and _os.path.exists(processed_path):
@@ -295,63 +314,115 @@ class FeishuClient:
             raise RuntimeError(f"Image upload failed: {data}")
         return data["data"]["image_key"]
 
-    @staticmethod
-    def _prepare_image(file_path: str, force: bool = False) -> str:
-        """Resize / compress an image to meet Feishu limits.
+    # 飞书 /im/v1/images 的硬限制
+    IMAGE_MAX_BYTES = 10 * 1024 * 1024   # 10 MB
+    IMAGE_MAX_DIM = 1500                 # 长边像素
+    # 可原样直传的格式（PIL 的 format 名）；其余一律转 JPEG
+    _PASSTHROUGH_FORMATS = {"JPEG", "PNG", "WEBP", "GIF", "BMP"}
+    _CT_BY_FORMAT = {
+        "JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp",
+        "GIF": "image/gif", "BMP": "image/bmp",
+    }
 
-        Returns the original path if no processing is needed, or a
-        temporary path for the processed image.  With ``force=True`` the
-        image is always converted to a clean JPEG (used as a retry when
-        Feishu can't recognize the original format).
+    @classmethod
+    def _prepare_image(cls, file_path: str, original_name: str, force: bool = False):
+        """把图片归一化成飞书可接受的上传件。
+
+        返回 ``(本地路径, 上传文件名, content_type)``；无需处理时原样返回。
+
+        ``force=True`` 时无论原格式如何都重编码为 JPEG（用于飞书报
+        234011「Can't recognize image format」后的重试）。
+
+        ⚠️ 旧实现有两个坑，是 4 位数图片持续转发失败的根因：
+        1. ``Image.open`` 失败时**原样返回**，调用方却仍把文件名改成 ``.jpg``、
+           content_type 写成 ``image/jpeg`` —— 于是把非 JPEG 的字节谎报成 JPEG，
+           飞书必然回 234011；
+        2. 超限时只降 quality、**从不降分辨率**，超大图可能压不到 10 MB 以下，
+           于是回 234006。
+        现在改为：解码失败直接抛错（不再谎报格式），压缩时先降 quality、
+        再按 0.75 逐步降分辨率，直到真的小于 10 MB。
         """
         import os as _os
         import tempfile
-        from PIL import Image
+        from PIL import Image, ImageFile
+
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        size_bytes = _os.path.getsize(file_path)
 
         try:
             img = Image.open(file_path)
-        except Exception:
-            # Not a valid PIL image — return as-is (let Feishu reject it)
-            return file_path
-
-        MAX_DIM = 1500
-        MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+            fmt = (img.format or "").upper()
+            # 超大图先降低解码尺寸（仅 JPEG 的 draft 生效，其它格式自动忽略），
+            # 避免一次性解码出几百 MB 的位图
+            if max(img.size) > cls.IMAGE_MAX_DIM * 2:
+                try:
+                    img.draft("RGB", (cls.IMAGE_MAX_DIM, cls.IMAGE_MAX_DIM))
+                except Exception:
+                    pass
+            img.load()   # 真正解码；损坏 / 截断的文件在这里暴露
+        except Exception as exc:
+            raise ImageNotSupportedError(
+                f"图片无法解码（{original_name}, {size_bytes} bytes, "
+                f"头部 {_head_hex(file_path)}）: {type(exc).__name__}: {exc}"
+            ) from exc
 
         w, h = img.size
-        needs_resize = w > MAX_DIM or h > MAX_DIM
-        needs_recompress = _os.path.getsize(file_path) > MAX_BYTES
+        needs_resize = max(w, h) > cls.IMAGE_MAX_DIM
+        needs_shrink = size_bytes > cls.IMAGE_MAX_BYTES
+        needs_convert = force or fmt not in cls._PASSTHROUGH_FORMATS
 
-        if not force and not needs_resize and not needs_recompress:
-            return file_path
+        if not (needs_resize or needs_shrink or needs_convert):
+            return file_path, original_name, cls._CT_BY_FORMAT.get(fmt, "image/jpeg")
 
-        # Resize if needed (preserve aspect ratio)
+        # ---- 重编码为 JPEG ----
         if needs_resize:
-            ratio = min(MAX_DIM / w, MAX_DIM / h)
-            new_size = (max(1, int(w * ratio)), max(1, int(h * ratio)))
-            img = img.resize(new_size, Image.LANCZOS)
+            ratio = cls.IMAGE_MAX_DIM / max(w, h)
+            img = img.resize((max(1, int(w * ratio)), max(1, int(h * ratio))), Image.LANCZOS)
 
-        # Convert to RGB if needed (e.g. RGBA, P mode)
-        if img.mode in ("RGBA", "P", "LA"):
-            bg = Image.new("RGB", img.size, (255, 255, 255))
-            if img.mode == "P":
-                img = img.convert("RGBA")
-            bg.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+        # 去透明 / 统一到 RGB（JPEG 不支持 alpha）
+        if img.mode in ("RGBA", "LA", "P"):
+            rgba = img.convert("RGBA")
+            bg = Image.new("RGB", rgba.size, (255, 255, 255))
+            bg.paste(rgba, mask=rgba.split()[-1])
             img = bg
         elif img.mode != "RGB":
             img = img.convert("RGB")
 
-        # Save as JPEG with progressive compression
-        fd, tmp_path = tempfile.mkstemp(suffix=".jpg", dir="/app/media_cache")
+        _os.makedirs(settings.media_cache_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(suffix=".jpg", dir=settings.media_cache_dir)
         _os.close(fd)
-        quality = 85
-        img.save(tmp_path, "JPEG", quality=quality, optimize=True)
+        try:
+            quality = 85
+            for _ in range(14):
+                img.save(tmp_path, "JPEG", quality=quality, optimize=True, progressive=True)
+                if _os.path.getsize(tmp_path) <= cls.IMAGE_MAX_BYTES:
+                    break
+                if quality > 45:
+                    quality -= 12          # 先降质量
+                else:
+                    w2, h2 = img.size      # 质量降到底仍超限 → 降分辨率
+                    if max(w2, h2) <= 320:
+                        break
+                    img = img.resize(
+                        (max(1, int(w2 * 0.75)), max(1, int(h2 * 0.75))), Image.LANCZOS
+                    )
+                    quality = 72
+            if _os.path.getsize(tmp_path) > cls.IMAGE_MAX_BYTES:
+                raise ImageNotSupportedError(
+                    f"图片压缩后仍超过 {cls.IMAGE_MAX_BYTES // 1048576}MB（{original_name}）"
+                )
+        except Exception:
+            if _os.path.exists(tmp_path):
+                _os.remove(tmp_path)
+            raise
 
-        # If still too large, reduce quality iteratively
-        while _os.path.getsize(tmp_path) > MAX_BYTES and quality > 20:
-            quality -= 10
-            img.save(tmp_path, "JPEG", quality=quality, optimize=True)
-
-        return tmp_path
+        upload_name = _os.path.splitext(original_name)[0] + ".jpg"
+        logger.info(
+            "[img] 归一化 %s (%s %dx%d, %.2f MB) → %s (%.2f MB)",
+            original_name, fmt or "?", w, h, size_bytes / 1048576,
+            upload_name, _os.path.getsize(tmp_path) / 1048576,
+        )
+        return tmp_path, upload_name, "image/jpeg"
 
     async def upload_file(self, file_path: str, file_type: str = "stream") -> str:
         """Upload a file (video/document) and return the file_key.

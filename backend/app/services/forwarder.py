@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 # 改为投递文案 + 本提示。
 VIDEO_NOTICE = "📹 此信息包含视频，请回 TG 观看原视频！"
 
+# 图片彻底转不过去时（本地解码失败 / 压缩后仍超飞书 10MB 上限）的降级提示。
+# 必须降级而不能一直失败：失败不推进 last_forwarded_id，而补抓是从该水位线往后拉的，
+# 一张永远转不过去的图会把整个频道的后续消息全部卡住。
+IMAGE_NOTICE = "🖼️ 原图无法转发到飞书（格式或体积超出飞书限制），请点击下方链接查看原图。"
+
 
 class Forwarder:
     """Main forwarding orchestration."""
@@ -120,7 +125,14 @@ class Forwarder:
 
         try:
             # Upload to Feishu
-            image_key = await feishu_client.upload_image(file_path)
+            image_key, err = await self._upload_image_safe(file_path, channel, msg)
+            if image_key is None:
+                # 图片确实转不过去 → 降级为「文字 + 原文链接」，
+                # 让水位线推进，否则这一条会把整个频道的后续消息永久卡死。
+                return await self._forward_text(
+                    chat_id, channel, sender,
+                    self._image_notice_text(channel, text, msg, err),
+                )
             # Send image message
             resp = await feishu_client.send_image(chat_id, image_key)
 
@@ -131,6 +143,24 @@ class Forwarder:
             return self._extract_msg_id(resp)
         finally:
             self._cleanup(file_path)
+
+    @staticmethod
+    async def _upload_image_safe(file_path: str, channel: Channel, msg):
+        """上传图片；失败时返回 ``(None, 原因)`` 而不是抛异常。
+
+        返回元组而非往 self 上写状态，避免多频道并发时互相串味。
+        """
+        try:
+            return await feishu_client.upload_image(file_path), ""
+        except Exception as exc:
+            reason = str(exc).strip()
+            if len(reason) > 160:
+                reason = reason[:160] + "…"
+            logger.warning(
+                "图片转发失败，将降级为文字+链接 (channel=%s msg=%s): %s",
+                channel.id, getattr(msg, "id", "?"), reason,
+            )
+            return None, reason
 
     async def _forward_video(self, chat_id: str, channel: Channel, sender: str, text: str, event, msg) -> str:
         """Videos are intentionally NOT forwarded.
@@ -166,6 +196,19 @@ class Forwarder:
         link = self._tg_message_link(channel, msg)
         if link:
             parts.append(link)
+        return "\n\n".join(parts)
+
+    def _image_notice_text(self, channel: Channel, text: str, msg, reason: str = "") -> str:
+        """Caption + 'view original on Telegram' notice used when the image can't be uploaded."""
+        parts = []
+        if text:
+            parts.append(text)
+        parts.append(IMAGE_NOTICE)
+        link = self._tg_message_link(channel, msg)
+        if link:
+            parts.append(link)
+        if reason:
+            parts.append(f"（原因：{reason}）")
         return "\n\n".join(parts)
 
     async def _forward_document(self, chat_id: str, channel: Channel, sender: str, text: str, event, msg) -> str:
@@ -327,7 +370,12 @@ class Forwarder:
         if not file_path:
             return await self._forward_text(chat_id, channel, sender, text)
         try:
-            image_key = await feishu_client.upload_image(file_path)
+            image_key, err = await self._upload_image_safe(file_path, channel, msg)
+            if image_key is None:
+                return await self._forward_text(
+                    chat_id, channel, sender,
+                    self._image_notice_text(channel, text, msg, err),
+                )
             resp = await feishu_client.send_image(chat_id, image_key)
             if text:
                 await self._forward_text(chat_id, channel, sender, text)

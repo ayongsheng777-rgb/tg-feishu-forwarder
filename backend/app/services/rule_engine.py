@@ -11,6 +11,7 @@ import logging
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from telethon.tl import types
 
 from app.models import Rule, Channel
 
@@ -97,20 +98,63 @@ class RuleEngine:
 
     @staticmethod
     def _get_media_type_from_msg(msg) -> str:
-        """Determine media type from a raw Telethon Message object."""
-        if msg.photo:
+        """Determine media type from a raw Telethon Message object.
+
+        ⚠️ 不要用 ``msg.photo`` 判断「这条消息是图片」。Telethon 1.37 的
+        ``Message.photo`` 在**消息本身没有媒体、但链接预览带图**时也会返回 truthy
+        （源码里的 ``else`` 分支会取 ``web_preview.photo``）。这类消息本质是
+        「文字 + 链接」，例如 ``https://fixupx.com/...``：
+
+        - 它被判成 ``photo``，于是走 ``download_media`` + ``upload_image``；
+        - 而 ``download_media`` 对 ``MessageMediaWebPage`` **优先取 document**，
+          拿到的往往是预览里的 mp4；
+        - 结果把 mp4 当图片传给飞书 → 234011「Can't recognize image format」
+          或 234006「file size exceed」；
+        - 又因为转发失败不推进 ``last_forwarded_id``，这一条会把**整个频道的
+          后续消息永久卡死**（补抓是从该水位线往后拉的）。
+
+        所以这里只认消息**自身**的媒体；链接预览只在「预览里确实是图片」时
+        才沿用旧行为按图片转发（`download_media` 对 WebPage 优先取 document，
+        所以必须确认没有 document 或 document 本身是图片）。
+        """
+        media = msg.media
+
+        # 真正的图片
+        if isinstance(media, types.MessageMediaPhoto):
             return "photo"
-        if msg.video:
-            return "video"
-        if msg.document:
-            mime = getattr(msg.document, "mime_type", "") or ""
+
+        # 真正的文档 / 视频 / 语音 / 贴纸
+        if isinstance(media, types.MessageMediaDocument):
+            doc = media.document
+            mime = (getattr(doc, "mime_type", "") or "").lower()
+            if msg.video:                      # DocumentAttributeVideo
+                return "video"
+            for attr in (getattr(doc, "attributes", None) or []):
+                if isinstance(attr, types.DocumentAttributeAudio) and getattr(attr, "voice", False):
+                    return "voice"
+                if isinstance(attr, types.DocumentAttributeSticker):
+                    return "sticker"
             if "gif" in mime:
                 return "video"
             if "sticker" in mime:
                 return "sticker"
             return "document"
-        if msg.voice:
-            return "voice"
+
+        # 链接预览：只有「预览里是图片」才按 photo（保持既有行为，这类消息
+        # 一直转发的是预览图且工作正常）；预览里是视频/文档则必须按文字，
+        # 否则会下到 mp4 当图片上传 → 234011/234006。
+        if isinstance(media, types.MessageMediaWebPage):
+            wp = media.webpage
+            if isinstance(wp, types.WebPage):
+                doc = getattr(wp, "document", None)
+                if doc is not None:
+                    mime = (getattr(doc, "mime_type", "") or "").lower()
+                    return "photo" if mime.startswith("image/") else "text"
+                if isinstance(getattr(wp, "photo", None), types.Photo):
+                    return "photo"
+            return "text"
+
+        # 其余（纯文字等）
         return "text"
 
 
